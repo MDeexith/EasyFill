@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import JSONResponse
 
-from ollama import generate_with_image
+from openrouter import generate_with_image
 
 router = APIRouter()
 
