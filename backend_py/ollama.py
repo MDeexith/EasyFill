@@ -2,7 +2,7 @@ import os
 import httpx
 
 OLLAMA_BASE = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-MODEL = "gemma3:4b"
+MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:e2b")
 TIMEOUT = 60.0
 
 

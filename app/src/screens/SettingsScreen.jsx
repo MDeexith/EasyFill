@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Eyebrow } from '../components/ui';
 import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
-import { clearProfile, saveHistory, setOnboarded } from '../profile/store';
+import { clearProfile, saveHistory, setOnboarded, clearFeedJobs } from '../profile/store';
 
 export default function SettingsScreen({ navigation }) {
   const resetAll = useCallback(() => {
@@ -19,6 +19,7 @@ export default function SettingsScreen({ navigation }) {
           onPress: () => {
             clearProfile();
             saveHistory([]);
+            clearFeedJobs();
             setOnboarded(false);
             const root = navigation.getParent()?.getParent() || navigation.getParent();
             root?.reset({ index: 0, routes: [{ name: 'Splash' }] });

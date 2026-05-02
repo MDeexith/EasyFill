@@ -7,6 +7,9 @@ import {
   StyleSheet,
   StatusBar,
   Animated,
+  Platform,
+  BackHandler,
+  Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import WebView from 'react-native-webview';
@@ -24,7 +27,17 @@ function getHostname(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
 }
 
-const TEXTLIKE_TYPES = new Set(['text', 'email', 'tel', 'url', 'number', 'search', 'textarea']);
+const WEBVIEW_USER_AGENT = Platform.select({
+  ios:
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) ' +
+    'AppleWebKit/605.1.15 (KHTML, like Gecko) ' +
+    'CriOS/124.0.6367.82 Mobile/15E148 Safari/604.1',
+  android:
+    'Mozilla/5.0 (Linux; Android 14; Pixel 8) ' +
+    'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+    'Chrome/124.0.6367.82 Mobile Safari/537.36',
+});
+
 
 export default function BrowserScreen({ route, navigation }) {
   const { url } = route.params;
@@ -38,6 +51,7 @@ export default function BrowserScreen({ route, navigation }) {
   const [filledCount, setFilledCount] = useState(0);
   const [draftProgress, setDraftProgress] = useState({ current: 0, total: 0 });
   const [tracked, setTracked] = useState(false);
+  const [webViewCanGoBack, setWebViewCanGoBack] = useState(false);
 
 
   const fabAnim = useRef(new Animated.Value(0)).current;
@@ -66,20 +80,53 @@ export default function BrowserScreen({ route, navigation }) {
     }).start();
   }, [phase, panelAnim]);
 
-  const doAutofill = useCallback(async (scanned) => {
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (webViewCanGoBack) {
+        webViewRef.current?.goBack();
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+  }, [webViewCanGoBack]);
+
+  function enrichProfile(raw) {
+    const p = { ...raw };
+    if (!p.firstName && !p.lastName && p.name) {
+      const parts = p.name.trim().split(/\s+/);
+      p.firstName = parts[0] || '';
+      p.lastName = parts.slice(1).join(' ') || '';
+    }
+    if (!p.name && (p.firstName || p.lastName)) {
+      p.name = [p.firstName, p.lastName].filter(Boolean).join(' ');
+    }
+    return p;
+  }
+
+  // Regex-only fill — no backend call
+  const doAutofillRegex = useCallback(async (scanned) => {
     setPhase('filling');
     try {
-      const profile = loadProfile();
-      const mapping = await matchFieldsToProfile(scanned, profile, true);
-      const fillMap = {};
-      for (const [fieldId, profileKey] of Object.entries(mapping || {})) {
-        if (profileKey && profile[profileKey] !== undefined && profile[profileKey] !== '') {
-          fillMap[fieldId] = String(profile[profileKey]);
-        }
-      }
-      const script = buildFillScript(fillMap, JSON.stringify(profile));
+      const profile = enrichProfile(loadProfile());
+      const mapping = await matchFieldsToProfile(scanned, profile, false);
+      const script = buildFillScript(mapping || {}, JSON.stringify(profile));
       webViewRef.current?.injectJavaScript(script);
-    } catch (e) {
+    } catch {
+      setPhase('detected');
+    }
+  }, []);
+
+  // AI-assisted fill — uses LLM for unmatched fields
+  const doAutofillAI = useCallback(async (scanned) => {
+    setPhase('filling');
+    try {
+      const profile = enrichProfile(loadProfile());
+      const mapping = await matchFieldsToProfile(scanned, profile, true);
+      const script = buildFillScript(mapping || {}, JSON.stringify(profile));
+      webViewRef.current?.injectJavaScript(script);
+    } catch {
       setPhase('detected');
     }
   }, []);
@@ -116,6 +163,42 @@ export default function BrowserScreen({ route, navigation }) {
       setPhase('filled');
     }
   }, [fields, currentUrl]);
+
+  const onShouldStartLoadWithRequest = useCallback((request) => {
+    const { url: reqUrl } = request;
+    if (
+      reqUrl.startsWith('tel:') ||
+      reqUrl.startsWith('mailto:') ||
+      reqUrl.startsWith('facetime:')
+    ) {
+      Linking.openURL(reqUrl).catch(() => {});
+      return false;
+    }
+    if (
+      Platform.OS === 'android' &&
+      (reqUrl.startsWith('intent:') ||
+        reqUrl.startsWith('market:') ||
+        reqUrl.startsWith('android-app:'))
+    ) {
+      Linking.openURL(reqUrl).catch(() => {});
+      return false;
+    }
+    return true;
+  }, []);
+
+  const onOpenWindow = useCallback((syntheticEvent) => {
+    const targetUrl = syntheticEvent.nativeEvent.targetUrl;
+    if (!targetUrl || targetUrl === 'about:blank') return;
+    if (targetUrl.startsWith('tel:') || targetUrl.startsWith('mailto:')) {
+      Linking.openURL(targetUrl).catch(() => {});
+      return;
+    }
+    if (targetUrl.startsWith('http')) {
+      webViewRef.current?.injectJavaScript(
+        `window.location.href = ${JSON.stringify(targetUrl)}; true;`
+      );
+    }
+  }, []);
 
   const onMessage = useCallback((event) => {
     try {
@@ -167,8 +250,13 @@ export default function BrowserScreen({ route, navigation }) {
         <IconBtn
           name="arrow-left"
           onPress={() => {
-            if (navigation.canGoBack()) navigation.goBack();
-            else navigation.replace('Main');
+            if (webViewCanGoBack) {
+              webViewRef.current?.goBack();
+            } else if (navigation.canGoBack()) {
+              navigation.goBack();
+            } else {
+              navigation.replace('Main');
+            }
           }}
           color="#fff"
           style={{ width: 32, height: 32 }}
@@ -192,7 +280,7 @@ export default function BrowserScreen({ route, navigation }) {
           ref={webViewRef}
           source={{ uri: url }}
           style={{ flex: 1, backgroundColor: '#fff' }}
-          onLoadStart={() => setLoading(true)}
+          onLoadStart={() => { setLoading(true); setPhase('loading'); setFields([]); }}
           onLoadEnd={() => {
             setLoading(false);
             webViewRef.current?.injectJavaScript(FORM_SCANNER_JS + '; true;');
@@ -201,8 +289,13 @@ export default function BrowserScreen({ route, navigation }) {
           onNavigationStateChange={state => {
             setCurrentUrl(state.url);
             setPageTitle(state.title || '');
+            setWebViewCanGoBack(state.canGoBack);
           }}
           onMessage={onMessage}
+          onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
+          onOpenWindow={onOpenWindow}
+          userAgent={WEBVIEW_USER_AGENT}
+          sharedCookiesEnabled={Platform.OS === 'ios'}
           javaScriptEnabled
           domStorageEnabled
           thirdPartyCookiesEnabled
@@ -287,39 +380,39 @@ export default function BrowserScreen({ route, navigation }) {
                     {longFormFields.length > 0 && (
                       <View style={styles.panelRow}>
                         <View style={styles.panelNum}><Text style={styles.panelNumText}>{longFormFields.length}</Text></View>
-                        <Text style={styles.panelRowText}>Long answers — AI drafted</Text>
-                        <Icon name="sparkles" size={14} color={theme.colors.accent} />
+                        <Text style={styles.panelRowText}>Long-form fields</Text>
+                        <Icon name="edit" size={14} color={theme.colors.muted} />
                       </View>
                     )}
                   </View>
 
+                  {/* Primary: regex fill — instant, no backend */}
                   <TouchableOpacity
-                    onPress={() => doAutofill(fields)}
+                    onPress={() => doAutofillRegex(fields)}
                     activeOpacity={0.85}
                     style={styles.fillBtn}
                   >
                     <Icon name="zap" size={15} color={theme.colors.accent} strokeWidth={2.5} />
                     <Text style={styles.fillBtnText}>
-                      Fill {shortFieldCount} field{shortFieldCount === 1 ? '' : 's'}
+                      Fill {shortFieldCount} field{shortFieldCount === 1 ? '' : 's'} · Regex
                     </Text>
                   </TouchableOpacity>
 
-                  {longFormFields.length > 0 && (
-                    <TouchableOpacity
-                      onPress={doAiDraft}
-                      activeOpacity={0.85}
-                      style={styles.aiBtn}
-                    >
-                      <Icon name="sparkles" size={14} color={theme.colors.accentInk} />
-                      <Text style={styles.aiBtnText}>
-                        Draft {longFormFields.length} long answer{longFormFields.length === 1 ? '' : 's'} with AI
-                      </Text>
-                    </TouchableOpacity>
-                  )}
+                  {/* Secondary: AI fill — smarter matching + long-form draft */}
+                  <TouchableOpacity
+                    onPress={() => { doAutofillAI(fields); longFormFields.length > 0 && doAiDraft(); }}
+                    activeOpacity={0.85}
+                    style={styles.aiBtn}
+                  >
+                    <Icon name="sparkles" size={14} color={theme.colors.accentInk} />
+                    <Text style={styles.aiBtnText}>
+                      Fill with AI{longFormFields.length > 0 ? ` + draft ${longFormFields.length} long answer${longFormFields.length === 1 ? '' : 's'}` : ''}
+                    </Text>
+                  </TouchableOpacity>
 
                   <View style={styles.panelFoot}>
                     <Icon name="lock" size={11} color={theme.colors.muted} />
-                    <Text style={styles.panelFootText}>Private AI · Profile stays on device</Text>
+                    <Text style={styles.panelFootText}>Regex is offline · AI uses your local backend</Text>
                   </View>
                 </>
               )}
@@ -399,7 +492,7 @@ const styles = StyleSheet.create({
   },
 
   loadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(255,255,255,0.9)',
     alignItems: 'center',
     justifyContent: 'center',

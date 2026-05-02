@@ -1,0 +1,47 @@
+Extract structured profile data from this resume text. Return ONLY a valid JSON object with these fields (omit fields you cannot find):
+
+{
+  "firstName": "",
+  "lastName": "",
+  "name": "",
+  "email": "",
+  "phone": "",
+  "address": "",
+  "city": "",
+  "state": "",
+  "zipCode": "",
+  "country": "",
+  "linkedIn": "",
+  "portfolio": "",
+  "github": "",
+  "currentTitle": "",
+  "currentCompany": "",
+  "yearsExperience": 0,
+  "skills": "",
+  "experience": [
+    {
+      "company": "",
+      "title": "",
+      "startDate": "",
+      "endDate": "",
+      "description": ""
+    }
+  ],
+  "education": [
+    {
+      "institution": "",
+      "degree": "",
+      "field": "",
+      "graduationYear": ""
+    }
+  ]
+}
+
+Rules:
+- Output ONLY the JSON object, no markdown, no explanation
+- skills: comma-separated string of technical/soft skills
+- name: full name (firstName + lastName combined)
+- yearsExperience: estimated total years from experience history
+
+Resume text:
+{{RESUME_TEXT}}

@@ -11,27 +11,28 @@ import { loadProfile, saveProfile } from '../profile/store';
 export default function UploadScreen({ navigation }) {
   const [state, setState] = useState('idle'); // idle | uploading | parsing
   const [fileName, setFileName] = useState('');
-  const [parsed, setParsed] = useState(null);
 
   const doPick = useCallback(async () => {
+    let stateTimer = null;
     try {
       const [result] = await pick({ type: [types.pdf] });
       setFileName(result.name ?? 'resume.pdf');
       setState('uploading');
-      setTimeout(() => setState('parsing'), 800);
+      stateTimer = setTimeout(() => setState('parsing'), 800);
       const profile = await parseResume(result.uri, result.name ?? 'resume.pdf');
+      clearTimeout(stateTimer);
+      setState('parsing');
       const existing = loadProfile();
-      const merged = { ...existing, ...profile };
-      saveProfile(merged);
-      setParsed(merged);
+      saveProfile({ ...existing, ...profile });
       setTimeout(() => navigation.replace('Confirm'), 1200);
     } catch (err) {
+      if (stateTimer) clearTimeout(stateTimer);
       if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) {
         setState('idle');
         return;
       }
       setState('idle');
-      Alert.alert('Parse failed', 'Check backend connection.');
+      Alert.alert('Parse failed', 'Could not parse resume. Check your backend connection.');
     }
   }, [navigation]);
 
@@ -66,8 +67,8 @@ export default function UploadScreen({ navigation }) {
               <View style={styles.uploadIcon}>
                 <Icon name="upload" size={20} color="#fff" />
               </View>
-              <Text style={styles.dropzoneTitle}>Upload resume</Text>
-              <Text style={styles.dropzoneSub}>PDF · Max 10 MB</Text>
+              <Text style={styles.dropzoneTitle}>Upload Resume</Text>
+              <Text style={styles.dropzoneSub}>PDF · Auto-parsed · Contact &amp; experience extracted</Text>
             </TouchableOpacity>
           )}
 
@@ -80,7 +81,7 @@ export default function UploadScreen({ navigation }) {
                 <View style={{ flex: 1 }}>
                   <Text style={styles.fileName} numberOfLines={1}>{fileName}</Text>
                   <Text style={[T.mono, { marginTop: 2 }]}>
-                    {state === 'uploading' ? 'Uploading…' : 'Parsing with AI…'}
+                    {state === 'uploading' ? 'Reading file…' : 'Parsing resume…'}
                   </Text>
                 </View>
                 {state === 'parsing' && <Icon name="sparkles" size={18} color={theme.colors.accent} />}
@@ -120,7 +121,7 @@ export default function UploadScreen({ navigation }) {
         <View style={styles.securityNote}>
           <Icon name="shield" size={18} color={theme.colors.ink} />
           <Text style={styles.securityText}>
-            Your resume stays on-device. We parse locally via your backend and never share it.
+            Your resume is sent to your local backend only — nothing reaches external servers.
           </Text>
         </View>
       </ScrollView>
@@ -163,9 +164,9 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: theme.colors.borderStrong,
     borderRadius: 18,
-    padding: 32,
+    padding: 28,
     alignItems: 'center',
-    gap: 12,
+    gap: 10,
   },
   uploadIcon: {
     width: 48,
