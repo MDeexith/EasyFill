@@ -1,0 +1,263 @@
+{
+  "info": {
+    "name": "EasyFill Python Backend",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:3001",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Match",
+      "item": [
+        {
+          "name": "POST /match",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/match/",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fields\": [\n    {\n      \"id\": \"inp_1\",\n      \"name\": \"email\",\n      \"label\": \"Email address\",\n      \"type\": \"email\"\n    },\n    {\n      \"id\": \"inp_2\",\n      \"name\": \"fname\",\n      \"label\": \"First Name\",\n      \"type\": \"text\"\n    },\n    {\n      \"id\": \"inp_3\",\n      \"name\": \"lname\",\n      \"label\": \"Last Name\",\n      \"type\": \"text\"\n    },\n    {\n      \"id\": \"inp_4\",\n      \"name\": \"phone\",\n      \"label\": \"Phone Number\",\n      \"type\": \"tel\"\n    },\n    {\n      \"id\": \"inp_5\",\n      \"name\": \"linkedin\",\n      \"label\": \"LinkedIn Profile URL\",\n      \"type\": \"url\"\n    }\n  ],\n  \"profile\": {\n    \"firstName\": \"Jane\",\n    \"lastName\": \"Doe\",\n    \"email\": \"jane@example.com\",\n    \"phone\": \"+1-555-000-1234\",\n    \"linkedIn\": \"https://linkedin.com/in/janedoe\",\n    \"city\": \"San Francisco\",\n    \"state\": \"CA\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Parse Resume",
+      "item": [
+        {
+          "name": "POST /parse-resume",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/parse-resume/",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "",
+                  "description": "Select a PDF or image resume file from your machine"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Generate",
+      "item": [
+        {
+          "name": "POST /generate — cover letter body",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/generate/",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"profile\": {\n    \"firstName\": \"Jane\",\n    \"lastName\": \"Doe\",\n    \"currentTitle\": \"Senior Software Engineer\",\n    \"currentCompany\": \"Acme Corp\",\n    \"yearsExperience\": 6,\n    \"skills\": \"Python, TypeScript, React, PostgreSQL, AWS\"\n  },\n  \"label\": \"Cover Letter\",\n  \"placeholder\": \"Tell us why you want to work here...\",\n  \"nearby\": \"Why are you a good fit for this role?\",\n  \"host\": \"stripe.com\"\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          }
+        },
+        {
+          "name": "POST /generate — short answer",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/generate/",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"profile\": {\n    \"firstName\": \"Jane\",\n    \"currentTitle\": \"Senior Software Engineer\",\n    \"skills\": \"Python, TypeScript, React\",\n    \"yearsExperience\": 6\n  },\n  \"label\": \"What is your greatest strength?\",\n  \"placeholder\": \"\",\n  \"nearby\": \"\",\n  \"host\": \"lever.co\"\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Jobs — Feed (existing scrapers)",
+      "item": [
+        {
+          "name": "GET /jobs/feed — all sources",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/jobs/feed?page=1",
+              "host": ["{{base_url}}"],
+              "path": ["jobs", "feed"],
+              "query": [
+                { "key": "page", "value": "1" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /jobs/feed — search + category",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/jobs/feed?search=frontend&category=Engineering&page=1",
+              "host": ["{{base_url}}"],
+              "path": ["jobs", "feed"],
+              "query": [
+                { "key": "search", "value": "frontend" },
+                { "key": "category", "value": "Engineering" },
+                { "key": "page", "value": "1" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /jobs/feed — remotive only",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/jobs/feed?sources=remotive&page=1",
+              "host": ["{{base_url}}"],
+              "path": ["jobs", "feed"],
+              "query": [
+                { "key": "sources", "value": "remotive" },
+                { "key": "page", "value": "1" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Jobs — Companies",
+      "item": [
+        {
+          "name": "GET /jobs/companies",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/jobs/companies"
+          }
+        },
+        {
+          "name": "POST /jobs/companies — add greenhouse",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/jobs/companies",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"handle\": \"airbnb\",\n  \"platform\": \"greenhouse\"\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          }
+        },
+        {
+          "name": "POST /jobs/companies — add lever",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/jobs/companies",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"handle\": \"openai\",\n  \"platform\": \"lever\"\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Jobs — JobSpy Scrape",
+      "item": [
+        {
+          "name": "GET /jobs/scrape — Indeed + LinkedIn",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/jobs/scrape?search_term=software+engineer&location=San+Francisco%2C+CA&site_name=indeed%2Clinkedin&results_wanted=10&hours_old=72&country_indeed=USA",
+              "host": ["{{base_url}}"],
+              "path": ["jobs", "scrape"],
+              "query": [
+                { "key": "search_term", "value": "software engineer" },
+                { "key": "location", "value": "San Francisco, CA" },
+                { "key": "site_name", "value": "indeed,linkedin" },
+                { "key": "results_wanted", "value": "10" },
+                { "key": "hours_old", "value": "72" },
+                { "key": "country_indeed", "value": "USA" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /jobs/scrape — ZipRecruiter remote",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/jobs/scrape?search_term=python+developer&site_name=zip_recruiter&results_wanted=15&is_remote=true",
+              "host": ["{{base_url}}"],
+              "path": ["jobs", "scrape"],
+              "query": [
+                { "key": "search_term", "value": "python developer" },
+                { "key": "site_name", "value": "zip_recruiter" },
+                { "key": "results_wanted", "value": "15" },
+                { "key": "is_remote", "value": "true" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /jobs/scrape — Google Jobs",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/jobs/scrape?site_name=google&google_search_term=software+engineer+jobs+near+New+York+since+yesterday&results_wanted=10",
+              "host": ["{{base_url}}"],
+              "path": ["jobs", "scrape"],
+              "query": [
+                { "key": "site_name", "value": "google" },
+                { "key": "google_search_term", "value": "software engineer jobs near New York since yesterday" },
+                { "key": "results_wanted", "value": "10" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /jobs/scrape — fulltime filter",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/jobs/scrape?search_term=data+scientist&location=Austin%2C+TX&site_name=indeed&job_type=fulltime&results_wanted=20&country_indeed=USA",
+              "host": ["{{base_url}}"],
+              "path": ["jobs", "scrape"],
+              "query": [
+                { "key": "search_term", "value": "data scientist" },
+                { "key": "location", "value": "Austin, TX" },
+                { "key": "site_name", "value": "indeed" },
+                { "key": "job_type", "value": "fulltime" },
+                { "key": "results_wanted", "value": "20" },
+                { "key": "country_indeed", "value": "USA" }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
