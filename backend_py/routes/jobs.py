@@ -1,8 +1,8 @@
-import re
-import time
 import asyncio
 import random
+import re
 import string
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 router = APIRouter()
 
-# ── Curated company lists ──────────────────────────────────────────────
+# ── Company lists (legacy board scrapers) ─────────────────────────────
 GREENHOUSE_COMPANIES = [
     'figma', 'stripe', 'notion', 'cloudflare', 'airtable',
     'databricks', 'discord', 'duolingo', 'gusto', 'hashicorp',
@@ -31,28 +31,17 @@ LEVER_COMPANIES = [
 
 custom_companies: list[dict] = []
 
+# ── JobSpy platforms ───────────────────────────────────────────────────
+INDIA_PLATFORMS = ["indeed", "linkedin", "naukri", "google", "glassdoor"]
+GLOBAL_PLATFORMS = ["indeed", "linkedin", "zip_recruiter", "google"]
+
 # ── Cache ──────────────────────────────────────────────────────────────
 _cache: dict[str, dict] = {}
-CACHE_TTL = 15 * 60  # 15 minutes
-SPY_SOURCES = {'linkedin', 'indeed', 'zip_recruiter', 'google'}
-SPY_CACHE_TTL = 30 * 60  # 30 min — scraping is expensive
+CACHE_TTL = 15 * 60          # 15 min — live API sources (Adzuna, Jobicy, etc.)
+SPY_CACHE_TTL = 3 * 60 * 60  # 3 h — JobSpy (query-based, populated on first request)
 
 
-def get_cached(key: str):
-    entry = _cache.get(key)
-    if not entry:
-        return None
-    if time.time() - entry["ts"] > CACHE_TTL:
-        del _cache[key]
-        return None
-    return entry["data"]
-
-
-def set_cache(key: str, data: list):
-    _cache[key] = {"data": data, "ts": time.time()}
-
-
-def get_cached_ttl(key: str, ttl: int):
+def get_cached(key: str, ttl: int = CACHE_TTL):
     entry = _cache.get(key)
     if not entry:
         return None
@@ -60,6 +49,10 @@ def get_cached_ttl(key: str, ttl: int):
         del _cache[key]
         return None
     return entry["data"]
+
+
+def set_cache(key: str, data: list):
+    _cache[key] = {"data": data, "ts": time.time()}
 
 
 # ── Role categorization ────────────────────────────────────────────────
@@ -88,7 +81,197 @@ def _rand_id(n: int = 8) -> str:
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 
-# ── Fetchers ──────────────────────────────────────────────────────────
+def _parse_date(date_str: Optional[str]) -> float:
+    if not date_str:
+        return 0
+    try:
+        return datetime.fromisoformat(date_str.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0
+
+
+# ── JobSpy — one fetcher per platform ─────────────────────────────────
+
+async def fetch_jobspy_platform(
+    platform: str,
+    search: str = "",
+    location: str = "India",
+    country_indeed: str = "India",
+    results_wanted: int = 50,
+    hours_old: int = 72,
+    job_type: Optional[str] = None,
+    is_remote: bool = False,
+) -> list:
+    """
+    Scrape a single job board via JobSpy.
+    Reads from cache first — pre-warmed by the 3-hour cron so most
+    requests return instantly without hitting the live scraper.
+    Falls back to live scraping if cache is empty (e.g. fresh startup).
+    """
+    cache_key = f"spy_{platform}_{search}_{location}".lower().replace(" ", "_")
+    cached = get_cached(cache_key, SPY_CACHE_TTL)
+    if cached is not None:
+        return cached
+
+    try:
+        from jobspy import scrape_jobs
+        import pandas as pd
+
+        kwargs: dict = {
+            "site_name": [platform],
+            "search_term": search or "software engineer",
+            "location": location,
+            "results_wanted": results_wanted,
+            "hours_old": hours_old,
+            "country_indeed": country_indeed,
+            "verbose": 0,
+        }
+        if job_type:
+            kwargs["job_type"] = job_type
+        if is_remote:
+            kwargs["is_remote"] = True
+
+        loop = asyncio.get_running_loop()
+        df = await loop.run_in_executor(None, lambda: scrape_jobs(**kwargs))
+
+        if df is None or df.empty:
+            set_cache(cache_key, [])
+            return []
+
+        df = df.where(pd.notna(df), None)
+        jobs = []
+        for _, row in df.iterrows():
+            loc_parts = [str(p) for p in [row.get("city"), row.get("state"), row.get("country")] if p]
+            title = str(row.get("title") or "")
+            job_url = str(row.get("job_url") or "")
+            posted = row.get("date_posted")
+            min_amt, max_amt = row.get("min_amount"), row.get("max_amount")
+            salary_parts = []
+            if min_amt is not None:
+                salary_parts.append(f"${min_amt:,.0f}")
+            if max_amt is not None:
+                salary_parts.append(f"${max_amt:,.0f}")
+            jobs.append({
+                "id": f"spy_{platform}_{abs(hash(job_url))}",
+                "title": title,
+                "company": str(row.get("company") or ""),
+                "department": str(row.get("job_function") or ""),
+                "category": categorize_role(title, str(row.get("job_function") or "")),
+                "location": ", ".join(loc_parts) or ("Remote" if row.get("is_remote") else ""),
+                "applyUrl": job_url,
+                "postedDate": str(posted) if posted is not None else None,
+                "source": platform,
+                "sourceLabel": platform.replace("_", " ").title(),
+                "isRemote": bool(row.get("is_remote")),
+                "jobType": str(row.get("job_type") or ""),
+                "salary": " - ".join(salary_parts) if salary_parts else None,
+                "currency": str(row.get("currency") or ""),
+                "description": str(row.get("description") or ""),
+            })
+
+        set_cache(cache_key, jobs)
+        return jobs
+    except Exception as e:
+        print(f"[jobspy:{platform}] error: {e}")
+        return []
+
+
+# ── Live API fetchers ──────────────────────────────────────────────────
+
+async def fetch_adzuna_jobs(search: str = "", location: str = "", country_code: str = "in") -> list:
+    import os
+    app_id = os.environ.get("ADZUNA_APP_ID", "")
+    app_key = os.environ.get("ADZUNA_APP_KEY", "")
+    if not app_id or not app_key:
+        return []
+
+    cache_key = f"adzuna_{country_code}_{search}_{location}"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        params: dict = {
+            "app_id": app_id,
+            "app_key": app_key,
+            "results_per_page": 50,
+            "content-type": "application/json",
+        }
+        if search:
+            params["what"] = search
+        if location:
+            params["where"] = location
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.get(
+                f"https://api.adzuna.com/v1/api/jobs/{country_code}/search/1",
+                params=params,
+            )
+            res.raise_for_status()
+            data = res.json()
+
+        country_label = {"in": "India", "us": "USA", "gb": "UK", "au": "Australia"}.get(country_code, country_code.upper())
+        jobs = []
+        for j in data.get("results", []):
+            loc = j.get("location", {}).get("display_name", "")
+            category = j.get("category", {}).get("label", "")
+            jobs.append({
+                "id": f"adzuna_{country_code}_{j['id']}",
+                "title": j.get("title", ""),
+                "company": j.get("company", {}).get("display_name", ""),
+                "department": category,
+                "category": categorize_role(j.get("title", ""), category),
+                "location": loc,
+                "applyUrl": j.get("redirect_url", ""),
+                "postedDate": j.get("created"),
+                "source": "adzuna",
+                "sourceLabel": f"Adzuna {country_label}",
+            })
+        set_cache(cache_key, jobs)
+        return jobs
+    except Exception as e:
+        print(f"[adzuna] error: {e}")
+        return []
+
+
+async def fetch_jobicy_jobs(search: str = "", count: int = 50) -> list:
+    cache_key = f"jobicy_{search}_{count}"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        params: dict = {"count": count}
+        if search:
+            params["tag"] = search
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.get("https://jobicy.com/api/v2/remote-jobs", params=params)
+            res.raise_for_status()
+            data = res.json()
+
+        jobs = []
+        for j in data.get("jobs", []):
+            title = j.get("jobTitle", "")
+            industry = j.get("jobIndustry", "")
+            jobs.append({
+                "id": f"jobicy_{j.get('id', _rand_id())}",
+                "title": title,
+                "company": j.get("companyName", ""),
+                "department": industry,
+                "category": categorize_role(title, industry),
+                "location": j.get("jobGeo", "Remote"),
+                "applyUrl": j.get("url", ""),
+                "postedDate": j.get("pubDate"),
+                "source": "jobicy",
+                "sourceLabel": "Jobicy",
+            })
+        set_cache(cache_key, jobs)
+        return jobs
+    except Exception as e:
+        print(f"[jobicy] error: {e}")
+        return []
+
 
 async def fetch_greenhouse_jobs(board_token: str) -> list:
     cache_key = f"gh_{board_token}"
@@ -180,14 +363,10 @@ async def fetch_remotive_jobs(search: str = "", category: str = "") -> list:
             params["search"] = search
         if category:
             cat_map = {
-                "Engineering": "software-dev",
-                "Design": "design",
-                "Product": "product",
-                "Marketing": "marketing",
-                "Sales": "sales",
-                "Data": "data",
-                "Support": "customer-support",
-                "Operations": "hr",
+                "Engineering": "software-dev", "Design": "design",
+                "Product": "product", "Marketing": "marketing",
+                "Sales": "sales", "Data": "data",
+                "Support": "customer-support", "Operations": "hr",
             }
             if category in cat_map:
                 params["category"] = cat_map[category]
@@ -255,104 +434,6 @@ async def fetch_arbeitnow_jobs(page: int = 1) -> list:
         return []
 
 
-async def fetch_jobspy_jobs(
-    search: str,
-    location: str,
-    sites: list[str],
-    is_remote: bool,
-    results_wanted: int = 20,
-    hours_old: int = 72,
-    country_indeed: str = "USA",
-    job_type: Optional[str] = None,
-    google_search_term: str = "",
-) -> list:
-    cache_key = f"spy_{'_'.join(sorted(sites))}_{search}_{location}_{is_remote}_{job_type}"
-    cached = get_cached_ttl(cache_key, SPY_CACHE_TTL)
-    if cached is not None:
-        return cached
-    try:
-        from jobspy import scrape_jobs
-        import pandas as pd
-
-        _INDIA_CITIES = {
-            'india', 'bangalore', 'bengaluru', 'mumbai', 'delhi', 'new delhi',
-            'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad', 'noida', 'gurgaon',
-        }
-        resolved_country = country_indeed
-        if location and any(kw in location.lower() for kw in _INDIA_CITIES):
-            resolved_country = "India"
-
-        kwargs: dict = {
-            "site_name": sites,
-            "search_term": search or "software engineer",
-            "results_wanted": results_wanted,
-            "hours_old": hours_old,
-            "country_indeed": resolved_country,
-            "verbose": 0,
-        }
-        if location:
-            kwargs["location"] = location
-        if is_remote:
-            kwargs["is_remote"] = True
-        if job_type:
-            kwargs["job_type"] = job_type
-        if google_search_term:
-            kwargs["google_search_term"] = google_search_term
-
-        loop = asyncio.get_running_loop()
-        jobs_df = await loop.run_in_executor(None, lambda: scrape_jobs(**kwargs))
-
-        if jobs_df is None or jobs_df.empty:
-            set_cache(cache_key, [])
-            return []
-
-        jobs_df = jobs_df.where(pd.notna(jobs_df), None)
-        jobs = []
-        for _, row in jobs_df.iterrows():
-            loc_parts = [str(p) for p in [row.get("city"), row.get("state"), row.get("country")] if p]
-            title = str(row.get("title") or "")
-            site = str(row.get("site") or "")
-            job_url = str(row.get("job_url") or "")
-            posted = row.get("date_posted")
-            min_amt, max_amt = row.get("min_amount"), row.get("max_amount")
-            salary_parts = []
-            if min_amt is not None:
-                salary_parts.append(f"${min_amt:,.0f}")
-            if max_amt is not None:
-                salary_parts.append(f"${max_amt:,.0f}")
-            jobs.append({
-                "id": f"spy_{site}_{abs(hash(job_url))}",
-                "title": title,
-                "company": str(row.get("company") or ""),
-                "department": str(row.get("job_function") or ""),
-                "category": categorize_role(title, str(row.get("job_function") or "")),
-                "location": ", ".join(loc_parts) or ("Remote" if row.get("is_remote") else ""),
-                "applyUrl": job_url,
-                "postedDate": str(posted) if posted is not None else None,
-                "source": site,
-                "sourceLabel": site.replace("_", " ").title(),
-                "isRemote": bool(row.get("is_remote")),
-                "jobType": str(row.get("job_type") or ""),
-                "salary": " - ".join(salary_parts) if salary_parts else None,
-                "currency": str(row.get("currency") or ""),
-                "description": str(row.get("description") or ""),
-            })
-        set_cache(cache_key, jobs)
-        return jobs
-    except Exception as e:
-        print(f"[jobspy] fetch error: {e}")
-        return []
-
-
-def _parse_date(date_str: Optional[str]) -> float:
-    if not date_str:
-        return 0
-    try:
-        return datetime.fromisoformat(date_str.replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return 0
-
-
 # ── Routes ─────────────────────────────────────────────────────────────
 
 @router.get("/feed")
@@ -360,47 +441,49 @@ async def jobs_feed(
     search: str = Query(default=""),
     category: str = Query(default=""),
     page: int = Query(default=1),
-    sources: str = Query(default=""),
     location: str = Query(default=""),
+    country: str = Query(default="in", description="'in'=India (default), 'us'/'gb'/etc, 'global'"),
     is_remote: bool = Query(default=False),
+    job_type: Optional[str] = Query(default=None),
+    experience: Optional[int] = Query(default=None, description="Years of experience (0=fresher, 1-2=junior, 3-5=mid, 6-9=senior, 10+=lead)"),
+    sources: str = Query(default="", description="Opt-in legacy sources: greenhouse,lever,remotive,arbeitnow"),
 ):
-    search = search.lower().strip()
-    DEFAULT_SPY_SITES = ["linkedin", "indeed", "zip_recruiter", "google"]
-
-    enabled_sources = (
-        [s.strip().lower() for s in sources.split(",") if s.strip()]
-        if sources else DEFAULT_SPY_SITES
-    )
+    search_q = search.lower().strip()
+    # experience is accepted but not applied to JobSpy — reserved for other platforms
+    is_india = country.lower() == "in"
+    india_location = location or ("India" if is_india else "")
+    country_indeed = "India" if is_india else "USA"
+    platforms = INDIA_PLATFORMS if is_india else GLOBAL_PLATFORMS
 
     tasks = []
 
-    # Legacy sources — only when explicitly requested
-    if "greenhouse" in enabled_sources:
-        companies = (
-            GREENHOUSE_COMPANIES[:15]
-            + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"]
-        )
-        for co in companies:
+    # JobSpy per platform — hits cache (pre-warmed by cron), falls back to live
+    for platform in platforms:
+        tasks.append(fetch_jobspy_platform(
+            platform,
+            search=search_q,
+            location=india_location,
+            country_indeed=country_indeed,
+            is_remote=is_remote,
+            job_type=job_type,
+        ))
+
+    # Live API sources — always called fresh (fast REST, 15-min cache)
+    tasks.append(fetch_adzuna_jobs(search_q, location, "in" if is_india else country))
+    tasks.append(fetch_jobicy_jobs(search_q))
+
+    # Optional legacy board sources (explicit opt-in via ?sources=greenhouse,lever,...)
+    extra = [s.strip().lower() for s in sources.split(",") if s.strip()]
+    if "greenhouse" in extra:
+        for co in GREENHOUSE_COMPANIES[:15] + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"]:
             tasks.append(fetch_greenhouse_jobs(co))
-
-    if "lever" in enabled_sources:
-        companies = (
-            LEVER_COMPANIES
-            + [c["handle"] for c in custom_companies if c["platform"] == "lever"]
-        )
-        for co in companies:
+    if "lever" in extra:
+        for co in LEVER_COMPANIES + [c["handle"] for c in custom_companies if c["platform"] == "lever"]:
             tasks.append(fetch_lever_jobs(co))
-
-    if "remotive" in enabled_sources:
-        tasks.append(fetch_remotive_jobs(search, category))
-
-    if "arbeitnow" in enabled_sources:
+    if "remotive" in extra:
+        tasks.append(fetch_remotive_jobs(search_q, category))
+    if "arbeitnow" in extra:
         tasks.append(fetch_arbeitnow_jobs(page))
-
-    # JobSpy — default when no explicit legacy sources requested
-    requested_spy_sites = [s for s in enabled_sources if s in SPY_SOURCES]
-    if requested_spy_sites:
-        tasks.append(fetch_jobspy_jobs(search, location, requested_spy_sites, is_remote))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -409,13 +492,13 @@ async def jobs_feed(
         if isinstance(r, list):
             all_jobs.extend(r)
 
-    if search:
+    if search_q:
         all_jobs = [
             j for j in all_jobs
-            if search in j["title"].lower()
-            or search in j["company"].lower()
-            or search in j["department"].lower()
-            or search in j["location"].lower()
+            if search_q in j["title"].lower()
+            or search_q in j["company"].lower()
+            or search_q in j["department"].lower()
+            or search_q in j["location"].lower()
         ]
 
     if category and category != "All":
@@ -425,10 +508,9 @@ async def jobs_feed(
 
     per_page = 50
     start = (page - 1) * per_page
-    paginated = all_jobs[start:start + per_page]
 
     return {
-        "jobs": paginated,
+        "jobs": all_jobs[start:start + per_page],
         "total": len(all_jobs),
         "page": page,
         "perPage": per_page,
@@ -436,17 +518,39 @@ async def jobs_feed(
     }
 
 
+@router.post("/refresh")
+def refresh_jobs():
+    """Clear the JobSpy cache so next /jobs/feed request re-scrapes live."""
+    cleared = [k for k in list(_cache.keys()) if k.startswith("spy_")]
+    for k in cleared:
+        del _cache[k]
+    return {"ok": True, "cleared": len(cleared), "message": "JobSpy cache cleared. Next /jobs/feed will re-scrape."}
+
+
+@router.get("/cache/status")
+def cache_status():
+    """Show all cached sources: job count, age, and time until expiry."""
+    now = time.time()
+    entries = {}
+    for key, entry in _cache.items():
+        age_secs = now - entry["ts"]
+        ttl = SPY_CACHE_TTL if key.startswith("spy_") else CACHE_TTL
+        entries[key] = {
+            "count": len(entry["data"]),
+            "age_minutes": round(age_secs / 60, 1),
+            "expires_in_minutes": round(max(0, ttl - age_secs) / 60, 1),
+        }
+    return {
+        "total_cached_jobs": sum(e["count"] for e in entries.values()),
+        "sources": entries,
+    }
+
+
 @router.get("/companies")
 def get_companies():
     return {
-        "greenhouse": (
-            GREENHOUSE_COMPANIES
-            + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"]
-        ),
-        "lever": (
-            LEVER_COMPANIES
-            + [c["handle"] for c in custom_companies if c["platform"] == "lever"]
-        ),
+        "greenhouse": GREENHOUSE_COMPANIES + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"],
+        "lever": LEVER_COMPANIES + [c["handle"] for c in custom_companies if c["platform"] == "lever"],
     }
 
 
@@ -462,116 +566,7 @@ def add_company(body: AddCompanyRequest):
             status_code=400,
             content={"error": "handle and platform (greenhouse|lever) are required"},
         )
-    exists = any(
-        c["handle"] == body.handle and c["platform"] == body.platform
-        for c in custom_companies
-    )
+    exists = any(c["handle"] == body.handle and c["platform"] == body.platform for c in custom_companies)
     if not exists:
         custom_companies.append({"handle": body.handle, "platform": body.platform})
     return {"ok": True}
-
-
-# ── JobSpy scrape endpoint ─────────────────────────────────────────────
-
-@router.get("/scrape")
-async def scrape_jobs_endpoint(
-    search_term: str = Query(default="software engineer"),
-    location: str = Query(default=""),
-    site_name: str = Query(default="indeed,linkedin,zip_recruiter,google"),
-    results_wanted: int = Query(default=20),
-    hours_old: int = Query(default=72),
-    job_type: Optional[str] = Query(default=None),
-    is_remote: bool = Query(default=False),
-    country_indeed: str = Query(default="USA"),
-    google_search_term: str = Query(default=""),
-    page: int = Query(default=1),
-):
-    """
-    Scrape jobs from LinkedIn, Indeed, ZipRecruiter, Google, Glassdoor, etc.
-    using the JobSpy library. Returns the same shape as /jobs/feed.
-    """
-    try:
-        from jobspy import scrape_jobs
-        import pandas as pd
-
-        sites = [s.strip() for s in site_name.split(",") if s.strip()]
-
-        kwargs: dict = {
-            "site_name": sites,
-            "search_term": search_term,
-            "results_wanted": results_wanted,
-            "hours_old": hours_old,
-            "country_indeed": country_indeed,
-            "verbose": 0,
-        }
-        if location:
-            kwargs["location"] = location
-        if job_type:
-            kwargs["job_type"] = job_type
-        if is_remote:
-            kwargs["is_remote"] = True
-        if google_search_term:
-            kwargs["google_search_term"] = google_search_term
-
-        # scrape_jobs is synchronous — run in thread pool to avoid blocking the event loop
-        loop = asyncio.get_event_loop()
-        jobs_df = await loop.run_in_executor(None, lambda: scrape_jobs(**kwargs))
-
-        if jobs_df is None or jobs_df.empty:
-            return {"jobs": [], "total": 0, "page": page, "perPage": 50, "hasMore": False}
-
-        jobs_df = jobs_df.where(pd.notna(jobs_df), None)
-
-        jobs = []
-        for _, row in jobs_df.iterrows():
-            loc_parts = [str(p) for p in [row.get("city"), row.get("state"), row.get("country")] if p]
-            loc = ", ".join(loc_parts)
-
-            min_amt = row.get("min_amount")
-            max_amt = row.get("max_amount")
-            salary_parts = []
-            if min_amt is not None:
-                salary_parts.append(f"${min_amt:,.0f}")
-            if max_amt is not None:
-                salary_parts.append(f"${max_amt:,.0f}")
-
-            title = str(row.get("title") or "")
-            company = str(row.get("company") or "")
-            site = str(row.get("site") or "")
-            job_url = str(row.get("job_url") or "")
-
-            posted = row.get("date_posted")
-            posted_str = str(posted) if posted is not None else None
-
-            jobs.append({
-                "id": f"spy_{site}_{abs(hash(job_url))}",
-                "title": title,
-                "company": company,
-                "department": str(row.get("job_function") or ""),
-                "category": categorize_role(title, str(row.get("job_function") or "")),
-                "location": loc or ("Remote" if row.get("is_remote") else ""),
-                "applyUrl": job_url,
-                "postedDate": posted_str,
-                "source": site,
-                "sourceLabel": site.replace("_", " ").title(),
-                "isRemote": bool(row.get("is_remote")),
-                "jobType": str(row.get("job_type") or ""),
-                "salary": " - ".join(salary_parts) if salary_parts else None,
-                "currency": str(row.get("currency") or ""),
-                "description": str(row.get("description") or ""),
-            })
-
-        per_page = 50
-        start = (page - 1) * per_page
-        paginated = jobs[start:start + per_page]
-
-        return {
-            "jobs": paginated,
-            "total": len(jobs),
-            "page": page,
-            "perPage": per_page,
-            "hasMore": start + per_page < len(jobs),
-        }
-    except Exception as e:
-        print(f"scrape error: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})

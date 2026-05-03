@@ -1,4 +1,5 @@
 import os
+
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -6,7 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
-from routes import match, parse_resume, generate, jobs
+from routes import generate, jobs, match, parse_resume
+
 
 app = FastAPI(title="EasyFill Backend")
 
