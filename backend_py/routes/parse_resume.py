@@ -6,7 +6,9 @@ from pathlib import Path
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import JSONResponse
 
-from ollama import generate
+# from ollama import generate
+from openrouter import generate
+
 from resume_extractor import extract_text_from_pdf_bytes, extract_profile_from_text
 
 router = APIRouter()

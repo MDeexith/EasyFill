@@ -7,7 +7,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from ollama import generate
+from openrouter import generate
 
 router = APIRouter()
 
