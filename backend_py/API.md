@@ -299,7 +299,7 @@ GET /jobs/feed?sources=greenhouse,lever&search=backend
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | `string` | Unique job ID (prefixed by source: `spy_`, `adzuna_`, `jobicy_`, `gh_`, etc.) |
+| `id` | `string` | Unique job ID (prefixed by source: `spy_`, `jobicy_`, `gh_`, etc.) |
 | `title` | `string` | Job title |
 | `company` | `string` | Company name |
 | `department` | `string` | Department or function |
@@ -307,7 +307,7 @@ GET /jobs/feed?sources=greenhouse,lever&search=backend
 | `location` | `string` | City, state, country or `"Remote"` |
 | `applyUrl` | `string` | Direct link to apply |
 | `postedDate` | `string\|null` | ISO 8601 date string or null |
-| `source` | `string` | Source platform: `indeed`, `linkedin`, `naukri`, `google`, `adzuna`, `jobicy`, etc. |
+| `source` | `string` | Source platform: `indeed`, `linkedin`, `naukri`, `google`, `jobicy`, etc. |
 | `sourceLabel` | `string` | Human-readable source name |
 | `isRemote` | `boolean` | Remote flag (JobSpy sources only) |
 | `jobType` | `string` | `fulltime`, `parttime`, `internship`, `contract` (JobSpy sources only) |
@@ -335,18 +335,6 @@ GET /jobs/feed?sources=greenhouse,lever&search=backend
       "currency": "INR",
       "description": "We are looking for a Senior Android Developer..."
     },
-    {
-      "id": "adzuna_in_98765432",
-      "title": "Android Engineer",
-      "company": "Zepto",
-      "department": "IT Jobs",
-      "category": "Engineering",
-      "location": "Mumbai, Maharashtra",
-      "applyUrl": "https://www.adzuna.in/jobs/details/98765432",
-      "postedDate": "2026-05-01T10:30:00Z",
-      "source": "adzuna",
-      "sourceLabel": "Adzuna India"
-    }
   ],
   "total": 143,
   "page": 1,
@@ -385,11 +373,6 @@ Shows all currently cached job sources, how many jobs are stored, how old the ca
       "age_minutes": 14.5,
       "expires_in_minutes": 165.5
     },
-    "adzuna_in__": {
-      "count": 47,
-      "age_minutes": 2.1,
-      "expires_in_minutes": 12.9
-    }
   }
 }
 ```
@@ -476,7 +459,6 @@ Content-Type: application/json
 | Source | TTL | Notes |
 |---|---|---|
 | JobSpy (Indeed, LinkedIn, Naukri, Google, Glassdoor) | **3 hours** | Query-based — populated on first request |
-| Adzuna | **15 minutes** | Fast REST API |
 | Jobicy | **15 minutes** | Fast REST API |
 | Greenhouse | **15 minutes** | Per company board |
 | Lever | **15 minutes** | Per company handle |
@@ -488,20 +470,6 @@ Content-Type: application/json
 ## 10. Source Test Routes
 
 Individual routes to test each non-JobSpy job source in isolation. Each returns the raw job list from that source plus a count.
-
-### `GET /jobs/sources/adzuna`
-
-| Param | Type | Default | Description |
-|---|---|---|---|
-| `search` | `string` | `""` | Keyword search |
-| `location` | `string` | `""` | City or region |
-| `country` | `string` | `"in"` | Country code: `in`, `us`, `gb`, `au` |
-
-```
-GET /jobs/sources/adzuna?search=android&location=Bangalore
-```
-
----
 
 ### `GET /jobs/sources/jobicy`
 
@@ -566,7 +534,7 @@ GET /jobs/sources/arbeitnow?page=1
 **All source routes return:**
 ```json
 {
-  "source": "adzuna",
+  "source": "jobicy",
   "count": 42,
   "jobs": [ ... ]
 }
@@ -579,6 +547,5 @@ GET /jobs/sources/arbeitnow?page=1
 | Variable | Required | Description |
 |---|---|---|
 | `OPENROUTER_API_KEY` | ✅ | OpenRouter API key for LLM endpoints |
-| `ADZUNA_APP_ID` | ❌ | Adzuna app ID (free at developer.adzuna.com) |
-| `ADZUNA_APP_KEY` | ❌ | Adzuna app key |
+
 | `PORT` | ❌ | Server port (default: `3001`) |

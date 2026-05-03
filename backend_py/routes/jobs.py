@@ -38,7 +38,7 @@ GLOBAL_PLATFORMS = ["indeed", "linkedin", "zip_recruiter", "google"]
 
 # ── Cache ──────────────────────────────────────────────────────────────
 _cache: dict[str, dict] = {}
-CACHE_TTL = 15 * 60          # 15 min — live API sources (Adzuna, Jobicy, etc.)
+CACHE_TTL = 15 * 60          # 15 min — live API sources (Jobicy, Greenhouse, etc.)
 SPY_CACHE_TTL = 3 * 60 * 60  # 3 h — JobSpy (query-based, populated on first request)
 
 
@@ -178,61 +178,6 @@ async def fetch_jobspy_platform(
 
 
 # ── Live API fetchers ──────────────────────────────────────────────────
-
-async def fetch_adzuna_jobs(search: str = "", location: str = "", country_code: str = "in") -> list:
-    app_id = os.environ.get("ADZUNA_APP_ID", "")
-    app_key = os.environ.get("ADZUNA_APP_KEY", "")
-    if not app_id or not app_key:
-        return []
-
-    cache_key = f"adzuna_{country_code}_{search}_{location}"
-    cached = get_cached(cache_key)
-    if cached is not None:
-        return cached
-
-    try:
-        params: dict = {
-            "app_id": app_id,
-            "app_key": app_key,
-            "results_per_page": 50,
-            "content-type": "application/json",
-        }
-        if search:
-            params["what"] = search
-        if location:
-            params["where"] = location
-
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            res = await client.get(
-                f"https://api.adzuna.com/v1/api/jobs/{country_code}/search/1",
-                params=params,
-            )
-            res.raise_for_status()
-            data = res.json()
-
-        country_label = {"in": "India", "us": "USA", "gb": "UK", "au": "Australia"}.get(country_code, country_code.upper())
-        jobs = []
-        for j in data.get("results", []):
-            loc = j.get("location", {}).get("display_name", "")
-            category = j.get("category", {}).get("label", "")
-            jobs.append({
-                "id": f"adzuna_{country_code}_{j['id']}",
-                "title": j.get("title", ""),
-                "company": j.get("company", {}).get("display_name", ""),
-                "department": category,
-                "category": categorize_role(j.get("title", ""), category),
-                "location": loc,
-                "applyUrl": j.get("redirect_url", ""),
-                "postedDate": j.get("created"),
-                "source": "adzuna",
-                "sourceLabel": f"Adzuna {country_label}",
-            })
-        set_cache(cache_key, jobs)
-        return jobs
-    except Exception as e:
-        print(f"[adzuna] error: {e}")
-        return []
-
 
 async def fetch_jobicy_jobs(search: str = "", count: int = 50) -> list:
     cache_key = f"jobicy_{search}_{count}"
@@ -436,16 +381,6 @@ async def fetch_arbeitnow_jobs(page: int = 1) -> list:
 
 # ── Source test routes ────────────────────────────────────────────────
 
-@router.get("/sources/adzuna")
-async def source_adzuna(
-    search: str = Query(default=""),
-    location: str = Query(default=""),
-    country: str = Query(default="in", description="Country code: in, us, gb, au"),
-):
-    jobs = await fetch_adzuna_jobs(search, location, country)
-    return {"source": "adzuna", "count": len(jobs), "jobs": jobs}
-
-
 @router.get("/sources/jobicy")
 async def source_jobicy(
     search: str = Query(default=""),
@@ -523,7 +458,6 @@ async def jobs_feed(
         ))
 
     # Live API sources — always called fresh (fast REST, 15-min cache)
-    tasks.append(fetch_adzuna_jobs(search_q, location, "in" if is_india else country))
     tasks.append(fetch_jobicy_jobs(search_q))
 
     # Optional legacy board sources (explicit opt-in via ?sources=greenhouse,lever,...)
