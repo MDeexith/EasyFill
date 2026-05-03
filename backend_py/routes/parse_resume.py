@@ -1,4 +1,4 @@
-import base64
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -6,7 +6,9 @@ from pathlib import Path
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import JSONResponse
 
-from ollama import generate
+# from ollama import generate
+from openrouter import generate
+
 from resume_extractor import extract_text_from_pdf_bytes, extract_profile_from_text
 
 router = APIRouter()
@@ -70,10 +72,20 @@ async def parse_resume(file: UploadFile = File(...)):
     if not file:
         return JSONResponse(status_code=400, content={"error": "No file uploaded"})
 
+    contents = await file.read()
+
     try:
         text = await _extract_text(contents)
     except Exception as e:
-        print(f"parse-resume error: {e}")
+        print(f"[pdf extract] failed: {e}")
+        return JSONResponse(status_code=500, content={"error": "Could not read PDF"})
+
+    if not text.strip():
+        return JSONResponse(status_code=422, content={"error": "PDF has no extractable text (scanned image PDF?)"})
+
+    ai_result, regex_result = await asyncio.gather(_run_ai(text), _run_regex(text))
+
+    if not ai_result and not regex_result:
         return JSONResponse(status_code=500, content={"error": "Resume parsing failed"})
 
     return {"profile": _merge(ai_result, regex_result)}
