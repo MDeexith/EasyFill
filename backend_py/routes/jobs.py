@@ -1,4 +1,5 @@
 import asyncio
+import os
 import random
 import re
 import string
@@ -102,12 +103,7 @@ async def fetch_jobspy_platform(
     job_type: Optional[str] = None,
     is_remote: bool = False,
 ) -> list:
-    """
-    Scrape a single job board via JobSpy.
-    Reads from cache first — pre-warmed by the 3-hour cron so most
-    requests return instantly without hitting the live scraper.
-    Falls back to live scraping if cache is empty (e.g. fresh startup).
-    """
+    """Scrape one JobSpy platform. Returns from 3h cache if warm, otherwise scrapes live."""
     cache_key = f"spy_{platform}_{search}_{location}".lower().replace(" ", "_")
     cached = get_cached(cache_key, SPY_CACHE_TTL)
     if cached is not None:
@@ -146,17 +142,22 @@ async def fetch_jobspy_platform(
             job_url = str(row.get("job_url") or "")
             posted = row.get("date_posted")
             min_amt, max_amt = row.get("min_amount"), row.get("max_amount")
+            currency_sym = {"INR": "₹", "USD": "$", "GBP": "£", "EUR": "€", "AUD": "A$"}.get(
+                str(row.get("currency") or ""), ""
+            )
             salary_parts = []
             if min_amt is not None:
-                salary_parts.append(f"${min_amt:,.0f}")
+                salary_parts.append(f"{currency_sym}{min_amt:,.0f}")
             if max_amt is not None:
-                salary_parts.append(f"${max_amt:,.0f}")
+                salary_parts.append(f"{currency_sym}{max_amt:,.0f}")
+            job_fn = row.get("job_function")
+            dept = ", ".join(job_fn) if isinstance(job_fn, list) else str(job_fn or "")
             jobs.append({
                 "id": f"spy_{platform}_{abs(hash(job_url))}",
                 "title": title,
                 "company": str(row.get("company") or ""),
-                "department": str(row.get("job_function") or ""),
-                "category": categorize_role(title, str(row.get("job_function") or "")),
+                "department": dept,
+                "category": categorize_role(title, dept),
                 "location": ", ".join(loc_parts) or ("Remote" if row.get("is_remote") else ""),
                 "applyUrl": job_url,
                 "postedDate": str(posted) if posted is not None else None,
@@ -179,7 +180,6 @@ async def fetch_jobspy_platform(
 # ── Live API fetchers ──────────────────────────────────────────────────
 
 async def fetch_adzuna_jobs(search: str = "", location: str = "", country_code: str = "in") -> list:
-    import os
     app_id = os.environ.get("ADZUNA_APP_ID", "")
     app_key = os.environ.get("ADZUNA_APP_KEY", "")
     if not app_id or not app_key:
@@ -457,7 +457,7 @@ async def jobs_feed(
 
     tasks = []
 
-    # JobSpy per platform — hits cache (pre-warmed by cron), falls back to live
+    # JobSpy per platform — 3h query-based cache, falls back to live scrape on miss
     for platform in platforms:
         tasks.append(fetch_jobspy_platform(
             platform,
@@ -495,10 +495,10 @@ async def jobs_feed(
     if search_q:
         all_jobs = [
             j for j in all_jobs
-            if search_q in j["title"].lower()
-            or search_q in j["company"].lower()
-            or search_q in j["department"].lower()
-            or search_q in j["location"].lower()
+            if search_q in str(j.get("title", "")).lower()
+            or search_q in str(j.get("company", "")).lower()
+            or search_q in str(j.get("department", "")).lower()
+            or search_q in str(j.get("location", "")).lower()
         ]
 
     if category and category != "All":
