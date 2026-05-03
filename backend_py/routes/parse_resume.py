@@ -1,4 +1,4 @@
-import asyncio
+import base64
 import json
 import re
 from pathlib import Path
@@ -70,20 +70,10 @@ async def parse_resume(file: UploadFile = File(...)):
     if not file:
         return JSONResponse(status_code=400, content={"error": "No file uploaded"})
 
-    contents = await file.read()
-
     try:
         text = await _extract_text(contents)
     except Exception as e:
-        print(f"[pdf extract] failed: {e}")
-        return JSONResponse(status_code=500, content={"error": "Could not read PDF"})
-
-    if not text.strip():
-        return JSONResponse(status_code=422, content={"error": "PDF has no extractable text (scanned image PDF?)"})
-
-    ai_result, regex_result = await asyncio.gather(_run_ai(text), _run_regex(text))
-
-    if not ai_result and not regex_result:
+        print(f"parse-resume error: {e}")
         return JSONResponse(status_code=500, content={"error": "Resume parsing failed"})
 
     return {"profile": _merge(ai_result, regex_result)}
