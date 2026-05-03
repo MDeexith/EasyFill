@@ -1,8 +1,9 @@
 import React, { useState, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { pick, types, isErrorWithCode, errorCodes } from '@react-native-documents/picker';
 import { Btn, IconBtn, Card, Eyebrow, T } from '../components/ui';
+import AppDialog, { useDialog } from '../components/AppDialog';
 import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
 import { parseResume } from '../api/backend';
@@ -11,6 +12,7 @@ import { loadProfile, saveProfile } from '../profile/store';
 export default function UploadScreen({ navigation }) {
   const [state, setState] = useState('idle'); // idle | uploading | parsing
   const [fileName, setFileName] = useState('');
+  const { show, dialogProps } = useDialog();
 
   const doPick = useCallback(async () => {
     let stateTimer = null;
@@ -32,9 +34,13 @@ export default function UploadScreen({ navigation }) {
         return;
       }
       setState('idle');
-      Alert.alert('Parse failed', 'Could not parse resume. Check your backend connection.');
+      show({
+        title: 'Parse failed',
+        message: 'Could not read your resume. Check your backend connection and try again.',
+        buttons: [{ text: 'OK' }],
+      });
     }
-  }, [navigation]);
+  }, [navigation, show]);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
@@ -125,6 +131,8 @@ export default function UploadScreen({ navigation }) {
           </Text>
         </View>
       </ScrollView>
+
+      <AppDialog {...dialogProps} />
     </SafeAreaView>
   );
 }

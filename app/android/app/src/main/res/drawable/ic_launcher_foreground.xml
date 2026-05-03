@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive icon foreground layer — generated from JetBrains Mono ExtraBold
+  108×108 dp canvas, 72×72 dp safe zone (18 dp inset on each side).
+  Background (#0a0a0a) is supplied by ic_launcher_background in colors.xml.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- "e" glyph — JetBrains Mono ExtraBold, size 72dp, centred in 108×108 -->
+    <path
+        android:pathData="M54.0720 79.9200Q48.8160 79.9200 44.8920 77.9400Q40.9680 75.9600 38.8440 72.3960Q36.7200 68.8320 36.7200 64.0800L36.7200 54.7200Q36.7200 49.9680 38.8440 46.4040Q40.9680 42.8400 44.8920 40.8600Q48.8160 38.8800 54.0720 38.8800Q59.3280 38.8800 63.1800 40.8600Q67.0320 42.8400 69.1560 46.4040Q71.2800 49.9680 71.2800 54.7200L71.2800 62.0640L47.0160 62.0640L47.0160 64.0800Q47.0160 67.8240 48.7800 69.5520Q50.5440 71.2800 54.0720 71.2800Q56.3760 71.2800 58.1040 70.5600Q59.8320 69.8400 60.1200 68.4000L70.7040 68.4000Q69.5520 73.5840 65.0160 76.7520Q60.4800 79.9200 54.0720 79.9200M47.0160 54.7200L47.0160 55.6560L60.9840 55.5120L60.9840 54.5760Q60.9840 50.9040 59.2920 48.8880Q57.6000 46.8720 54.0720 46.8720Q50.5440 46.8720 48.7800 48.9600Q47.0160 51.0480 47.0160 54.7200"
+        android:fillColor="#fafafa"/>
+
+    <!-- Green accent dot — top-right, mirrors the SVG asset position -->
+    <path
+        android:pathData="M82.30,29.50 m-4.60,0 a4.60,4.60 0 1,0 9.20,0 a4.60,4.60 0 1,0 -9.20,0"
+        android:fillColor="#34d399"/>
+
+</vector>

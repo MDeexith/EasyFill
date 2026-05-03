@@ -52,16 +52,21 @@ export default function BrowserScreen({ route, navigation }) {
   const [draftProgress, setDraftProgress] = useState({ current: 0, total: 0 });
   const [tracked, setTracked] = useState(false);
   const [webViewCanGoBack, setWebViewCanGoBack] = useState(false);
+  const [fillStats, setFillStats] = useState({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+
+  const urlRef = useRef(url);
+  const titleRef = useRef('');
 
 
   const fabAnim = useRef(new Animated.Value(0)).current;
   const panelAnim = useRef(new Animated.Value(0)).current;
+  const lastInjectedUrl = useRef('');
 
   const longFormFields = fields.filter(f => f.longform);
   const fieldCount = fields.length;
 
   useEffect(() => {
-    const shouldShowFab = phase === 'detected' || phase === 'filled';
+    const shouldShowFab = phase === 'detected' || phase === 'filled' || phase === 'no-fields';
     Animated.spring(fabAnim, {
       toValue: shouldShowFab ? 1 : 0,
       useNativeDriver: true,
@@ -69,6 +74,19 @@ export default function BrowserScreen({ route, navigation }) {
       friction: 8,
     }).start();
   }, [phase, fabAnim]);
+
+  // After page load, if no FIELDS_SCANNED message ever arrives, fall into a
+  // 'no-fields' state so the user gets a manual "Scan again" affordance
+  // instead of an invisible feature.
+  useEffect(() => {
+    if (loading) return;
+    if (fields.length > 0) return;
+    if (phase !== 'loading') return;
+    const timer = setTimeout(() => {
+      setPhase(prev => (prev === 'loading' ? 'no-fields' : prev));
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [loading, fields.length, phase]);
 
   useEffect(() => {
     const shouldShowPanel = phase === 'panel' || phase === 'filling' || phase === 'drafting';
@@ -102,43 +120,51 @@ export default function BrowserScreen({ route, navigation }) {
     if (!p.name && (p.firstName || p.lastName)) {
       p.name = [p.firstName, p.lastName].filter(Boolean).join(' ');
     }
+
+    // Derive current title/company/yoe from experience[] when those keys are
+    // empty, so the matcher has more profile keys to satisfy.
+    const xp = Array.isArray(p.experience) ? p.experience : [];
+    if (xp.length > 0) {
+      const latest = xp[0] || {};
+      if (!p.currentTitle && latest.title) p.currentTitle = latest.title;
+      if (!p.currentCompany && latest.company) p.currentCompany = latest.company;
+      if (!p.yearsExperience || p.yearsExperience === 0) {
+        let totalMonths = 0;
+        for (const e of xp) {
+          const start = e.startDate ? new Date(e.startDate) : null;
+          const end = e.endDate ? new Date(e.endDate) : new Date();
+          if (start && !isNaN(start) && end && !isNaN(end) && end > start) {
+            totalMonths += (end - start) / (1000 * 60 * 60 * 24 * 30.44);
+          }
+        }
+        if (totalMonths > 0) p.yearsExperience = Math.round(totalMonths / 12);
+      }
+    }
+
+    // Back-compat: legacy `salary` resolves to expectedSalary if the latter
+    // is empty.
+    if (!p.expectedSalary && p.salary) p.expectedSalary = p.salary;
+
+    // Compose skills with any per-experience skills arrays.
+    const skillSet = new Set();
+    if (typeof p.skills === 'string' && p.skills.trim()) {
+      p.skills.split(',').map(s => s.trim()).filter(Boolean).forEach(s => skillSet.add(s));
+    }
+    for (const e of xp) {
+      if (Array.isArray(e.skills)) e.skills.forEach(s => s && skillSet.add(s));
+    }
+    if (skillSet.size > 0) p.skills = Array.from(skillSet).join(', ');
+
     return p;
   }
 
-  // Regex-only fill — no backend call
-  const doAutofillRegex = useCallback(async (scanned) => {
-    setPhase('filling');
-    try {
-      const profile = enrichProfile(loadProfile());
-      const mapping = await matchFieldsToProfile(scanned, profile, false);
-      const script = buildFillScript(mapping || {}, JSON.stringify(profile));
-      webViewRef.current?.injectJavaScript(script);
-    } catch {
-      setPhase('detected');
-    }
-  }, []);
-
-  // AI-assisted fill — uses LLM for unmatched fields
-  const doAutofillAI = useCallback(async (scanned) => {
-    setPhase('filling');
-    try {
-      const profile = enrichProfile(loadProfile());
-      const mapping = await matchFieldsToProfile(scanned, profile, true);
-      const script = buildFillScript(mapping || {}, JSON.stringify(profile));
-      webViewRef.current?.injectJavaScript(script);
-    } catch {
-      setPhase('detected');
-    }
-  }, []);
-
-  const doAiDraft = useCallback(async () => {
-    const longs = fields.filter(f => f.longform);
-    if (longs.length === 0) return;
+  const doAiDraft = useCallback(async (longs) => {
+    if (!longs || longs.length === 0) return;
     setPhase('drafting');
     setDraftProgress({ current: 0, total: longs.length });
 
     const profile = loadProfile();
-    const host = getHostname(currentUrl);
+    const host = getHostname(urlRef.current);
     const drafts = {};
 
     for (let i = 0; i < longs.length; i++) {
@@ -159,10 +185,54 @@ export default function BrowserScreen({ route, navigation }) {
     if (Object.keys(drafts).length > 0) {
       const script = buildDirectFillScript(drafts);
       webViewRef.current?.injectJavaScript(script);
+      // Fallback: AI_FILL_COMPLETE message sets phase, but guard against it not firing
+      setTimeout(() => setPhase(p => p === 'drafting' ? 'filled' : p), 5000);
     } else {
       setPhase('filled');
     }
-  }, [fields, currentUrl]);
+  }, []);
+
+  // Unified autofill: priority pipeline (autocomplete/type > AI > regex),
+  // followed by long-form AI drafting.
+  const doAutofill = useCallback(async (scanned) => {
+    setPhase('filling');
+    setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+    try {
+      const profile = enrichProfile(loadProfile());
+
+      const { mapping, decisions } = await matchFieldsToProfile(scanned, profile, true);
+
+      let autoMatched = 0;
+      let aiMatched = 0;
+      let regexMatched = 0;
+      for (const dec of Object.values(decisions || {})) {
+        if (!dec || !dec.key) continue;
+        if (dec.source === 'autocomplete' || dec.source === 'type') autoMatched++;
+        else if (dec.source === 'ai' || dec.source === 'ai-low') aiMatched++;
+        else regexMatched++;
+      }
+      setFillStats({ autoMatched, aiMatched, regexMatched });
+
+      const script = buildFillScript(mapping, JSON.stringify(profile));
+      webViewRef.current?.injectJavaScript(script);
+
+      const longs = scanned.filter(f => f.longform);
+      if (longs.length > 0) {
+        await doAiDraft(longs);
+      }
+    } catch {
+      setPhase('detected');
+    }
+  }, [doAiDraft]);
+
+  const manualRescan = useCallback(() => {
+    setPhase('loading');
+    setFields([]);
+    setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+    // Clear the install guard so the scanner re-runs from scratch.
+    webViewRef.current?.injectJavaScript('window.__AF_SCANNER_INSTALLED__ = false; true;');
+    webViewRef.current?.injectJavaScript(FORM_SCANNER_JS + '; true;');
+  }, []);
 
   const onShouldStartLoadWithRequest = useCallback((request) => {
     const { url: reqUrl } = request;
@@ -207,41 +277,38 @@ export default function BrowserScreen({ route, navigation }) {
       if (data.type === 'FIELDS_SCANNED') {
         const scanned = data.fields || [];
         setFields(scanned);
-        if (scanned.length > 0 && phase === 'loading') {
-          setPhase('detected');
+        if (scanned.length > 0) {
+          setPhase(prev => prev === 'loading' ? 'detected' : prev);
         }
       }
 
       if (data.type === 'FILL_COMPLETE') {
         const n = data.filled ?? 0;
         setFilledCount(prev => prev + n);
-        if (!tracked && n > 0) {
-          addHistoryEntry({
-            url: currentUrl,
-            title: pageTitle || getHostname(currentUrl),
-            status: 'submitted',
-            filled: n,
-          });
-          setTracked(true);
-        }
-        // Re-scan for longform fields after initial fill
-        setTimeout(() => {
-          setPhase('filled');
-        }, 200);
+        setTracked(prev => {
+          if (!prev && n > 0) {
+            addHistoryEntry({
+              url: urlRef.current,
+              title: titleRef.current || getHostname(urlRef.current),
+              status: 'submitted',
+              filled: n,
+            });
+            return true;
+          }
+          return prev;
+        });
+        setTimeout(() => setPhase(prev => prev === 'filling' ? 'filled' : prev), 200);
       }
 
       if (data.type === 'AI_FILL_COMPLETE') {
         const n = data.filled ?? 0;
         setFilledCount(prev => prev + n);
-        setPhase('filled');
+        setPhase(prev => prev === 'drafting' ? 'filled' : prev);
       }
-
-
     } catch {}
-  }, [phase, currentUrl, pageTitle, tracked]);
+  }, []);
 
   const host = getHostname(currentUrl);
-  const shortFieldCount = fieldCount - longFormFields.length;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
@@ -280,16 +347,28 @@ export default function BrowserScreen({ route, navigation }) {
           ref={webViewRef}
           source={{ uri: url }}
           style={{ flex: 1, backgroundColor: '#fff' }}
-          onLoadStart={() => { setLoading(true); setPhase('loading'); setFields([]); }}
+          onLoadStart={() => { setLoading(true); setPhase('loading'); setFields([]); setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 }); }}
           onLoadEnd={() => {
             setLoading(false);
+            lastInjectedUrl.current = currentUrl;
             webViewRef.current?.injectJavaScript(FORM_SCANNER_JS + '; true;');
-
           }}
           onNavigationStateChange={state => {
             setCurrentUrl(state.url);
             setPageTitle(state.title || '');
             setWebViewCanGoBack(state.canGoBack);
+            urlRef.current = state.url;
+            titleRef.current = state.title || '';
+            // Catch SPA route changes that don't trigger onLoadEnd
+            if (state.url && state.url !== lastInjectedUrl.current) {
+              lastInjectedUrl.current = state.url;
+              setPhase('loading');
+              setFields([]);
+              setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+              setTimeout(() => {
+                webViewRef.current?.injectJavaScript(FORM_SCANNER_JS + '; true;');
+              }, 600);
+            }
           }}
           onMessage={onMessage}
           onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
@@ -309,7 +388,7 @@ export default function BrowserScreen({ route, navigation }) {
 
 
 
-        {(phase === 'detected' || phase === 'filled') && (
+        {(phase === 'detected' || phase === 'filled' || phase === 'no-fields') && (
           <Animated.View
             style={[
               styles.fab,
@@ -321,23 +400,39 @@ export default function BrowserScreen({ route, navigation }) {
               },
             ]}
           >
-            <TouchableOpacity activeOpacity={0.85} style={styles.fabBtn} onPress={() => setPhase('panel')}>
+            <TouchableOpacity
+              activeOpacity={0.85}
+              style={styles.fabBtn}
+              onPress={() => phase === 'no-fields' ? manualRescan() : setPhase('panel')}
+            >
               <View style={styles.fabDot}>
                 <Icon
-                  name={phase === 'filled' ? 'check' : 'zap'}
+                  name={
+                    phase === 'filled' ? 'check' :
+                    phase === 'no-fields' ? 'refresh' :
+                    'zap'
+                  }
                   size={14}
                   color="#052e1f"
                   strokeWidth={phase === 'filled' ? 3 : 2.5}
                 />
               </View>
               <Text style={styles.fabText}>
-                {phase === 'filled' ? 'Filled' : 'Autofill ready'}
+                {phase === 'filled'
+                  ? ((fillStats.autoMatched + fillStats.aiMatched) > 0
+                      ? `Auto:${fillStats.autoMatched} · AI:${fillStats.aiMatched} · Regex:${fillStats.regexMatched}`
+                      : 'Filled')
+                  : phase === 'no-fields'
+                    ? 'No fields · tap to rescan'
+                    : 'Autofill ready'}
               </Text>
-              <View style={styles.fabCount}>
-                <Text style={styles.fabCountText}>
-                  {phase === 'filled' ? filledCount : fieldCount}
-                </Text>
-              </View>
+              {phase !== 'no-fields' && (
+                <View style={styles.fabCount}>
+                  <Text style={styles.fabCountText}>
+                    {phase === 'filled' ? filledCount : fieldCount}
+                  </Text>
+                </View>
+              )}
             </TouchableOpacity>
           </Animated.View>
         )}
@@ -373,46 +468,33 @@ export default function BrowserScreen({ route, navigation }) {
 
                   <View style={styles.panelStats}>
                     <View style={styles.panelRow}>
-                      <View style={styles.panelNum}><Text style={styles.panelNumText}>{shortFieldCount}</Text></View>
-                      <Text style={styles.panelRowText}>Personal + work fields</Text>
-                      <Icon name="check" size={14} color={theme.colors.accent} strokeWidth={2.5} />
+                      <View style={styles.panelNum}><Text style={styles.panelNumText}>{fieldCount - longFormFields.length}</Text></View>
+                      <Text style={styles.panelRowText}>Short fields</Text>
+                      <Icon name="zap" size={13} color={theme.colors.accent} strokeWidth={2.5} />
                     </View>
                     {longFormFields.length > 0 && (
                       <View style={styles.panelRow}>
                         <View style={styles.panelNum}><Text style={styles.panelNumText}>{longFormFields.length}</Text></View>
-                        <Text style={styles.panelRowText}>Long-form fields</Text>
-                        <Icon name="edit" size={14} color={theme.colors.muted} />
+                        <Text style={styles.panelRowText}>Long-form {longFormFields.length === 1 ? 'answer' : 'answers'}</Text>
+                        <Icon name="sparkles" size={13} color={theme.colors.muted} />
                       </View>
                     )}
                   </View>
 
-                  {/* Primary: regex fill — instant, no backend */}
                   <TouchableOpacity
-                    onPress={() => doAutofillRegex(fields)}
+                    onPress={() => doAutofill(fields)}
                     activeOpacity={0.85}
                     style={styles.fillBtn}
                   >
-                    <Icon name="zap" size={15} color={theme.colors.accent} strokeWidth={2.5} />
+                    <Icon name="sparkles" size={15} color={theme.colors.accent} strokeWidth={2.5} />
                     <Text style={styles.fillBtnText}>
-                      Fill {shortFieldCount} field{shortFieldCount === 1 ? '' : 's'} · Regex
-                    </Text>
-                  </TouchableOpacity>
-
-                  {/* Secondary: AI fill — smarter matching + long-form draft */}
-                  <TouchableOpacity
-                    onPress={() => { doAutofillAI(fields); longFormFields.length > 0 && doAiDraft(); }}
-                    activeOpacity={0.85}
-                    style={styles.aiBtn}
-                  >
-                    <Icon name="sparkles" size={14} color={theme.colors.accentInk} />
-                    <Text style={styles.aiBtnText}>
-                      Fill with AI{longFormFields.length > 0 ? ` + draft ${longFormFields.length} long answer${longFormFields.length === 1 ? '' : 's'}` : ''}
+                      Autofill {fieldCount} field{fieldCount === 1 ? '' : 's'}
                     </Text>
                   </TouchableOpacity>
 
                   <View style={styles.panelFoot}>
-                    <Icon name="lock" size={11} color={theme.colors.muted} />
-                    <Text style={styles.panelFootText}>Regex is offline · AI uses your local backend</Text>
+                    <Icon name="zap" size={11} color={theme.colors.muted} />
+                    <Text style={styles.panelFootText}>AI matching · Regex fallback · Local backend</Text>
                   </View>
                 </>
               )}
@@ -423,9 +505,9 @@ export default function BrowserScreen({ route, navigation }) {
                     <ActivityIndicator color={theme.colors.accentInk} />
                   </View>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.panelTitle}>Autofilling…</Text>
+                    <Text style={styles.panelTitle}>Matching fields…</Text>
                     <Text style={[styles.panelSub, { marginTop: 4 }]}>
-                      Matching your profile to each field
+                      AI + regex analyzing {fieldCount} fields
                     </Text>
                   </View>
                 </View>
