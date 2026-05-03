@@ -41,10 +41,14 @@ function relativeTime(dateStr) {
 }
 
 const SOURCE_COLORS = {
-  greenhouse: { bg: '#ecfdf5', fg: '#065f46', label: 'Greenhouse' },
-  lever: { bg: '#eff6ff', fg: '#1e40af', label: 'Lever' },
-  remotive: { bg: '#f0fdf4', fg: '#166534', label: 'Remotive' },
-  arbeitnow: { bg: '#fef3c7', fg: '#92400e', label: 'Arbeitnow' },
+  greenhouse:    { bg: '#ecfdf5', fg: '#065f46', label: 'Greenhouse' },
+  lever:         { bg: '#eff6ff', fg: '#1e40af', label: 'Lever' },
+  remotive:      { bg: '#f0fdf4', fg: '#166534', label: 'Remotive' },
+  arbeitnow:     { bg: '#fef3c7', fg: '#92400e', label: 'Arbeitnow' },
+  linkedin:      { bg: '#eff6ff', fg: '#1e40af', label: 'LinkedIn' },
+  indeed:        { bg: '#fef3c7', fg: '#92400e', label: 'Indeed' },
+  zip_recruiter: { bg: '#f0fdf4', fg: '#166534', label: 'ZipRecruiter' },
+  google:        { bg: '#fdf4ff', fg: '#7e22ce', label: 'Google Jobs' },
 };
 
 const ROLE_ICONS = {
@@ -59,7 +63,7 @@ const ROLE_ICONS = {
   Other: 'briefcase',
 };
 
-function TrendingJobCard({ job, onPress }) {
+function LatestJobCard({ job, onPress }) {
   const source = SOURCE_COLORS[job.source] || SOURCE_COLORS.greenhouse;
   const roleIcon = ROLE_ICONS[job.category] || 'briefcase';
   return (
@@ -91,18 +95,23 @@ function TrendingJobCard({ job, onPress }) {
   );
 }
 
+const THREE_DAYS_MS = 72 * 60 * 60 * 1000;
+function filterLatestJobs(jobs) {
+  return jobs.filter(j => j.postedDate && Date.now() - new Date(j.postedDate).getTime() <= THREE_DAYS_MS);
+}
+
 export default function HomeScreen({ navigation }) {
   const [url, setUrl] = useState('');
   const [profile, setProfile] = useState(() => loadProfile());
-  const [trendingJobs, setTrendingJobs] = useState(() => loadFeedJobs().slice(0, 6));
-  const [loadingTrending, setLoadingTrending] = useState(false);
+  const [latestJobs, setLatestJobs] = useState(() => filterLatestJobs(loadFeedJobs()).slice(0, 6));
+  const [loadingLatest, setLoadingLatest] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
       setProfile(loadProfile());
       const cached = loadFeedJobs();
       if (cached.length > 0) {
-        setTrendingJobs(cached.slice(0, 6));
+        setLatestJobs(filterLatestJobs(cached).slice(0, 6));
       }
     }, [])
   );
@@ -111,17 +120,17 @@ export default function HomeScreen({ navigation }) {
   useEffect(() => {
     let cancelled = false;
     async function fetchPreview() {
-      setLoadingTrending(true);
+      setLoadingLatest(true);
       try {
         const result = await fetchJobFeed({ page: 1 });
         if (!cancelled && result.jobs?.length > 0) {
-          setTrendingJobs(result.jobs.slice(0, 6));
+          setLatestJobs(filterLatestJobs(result.jobs).slice(0, 6));
           saveFeedJobs(result.jobs);
         }
       } catch {
         // Use cached data — already loaded in state
       } finally {
-        if (!cancelled) setLoadingTrending(false);
+        if (!cancelled) setLoadingLatest(false);
       }
     }
     fetchPreview();
@@ -150,10 +159,12 @@ export default function HomeScreen({ navigation }) {
   ];
 
   const API_SOURCES = [
+    { name: 'LinkedIn', icon: 'briefcase', color: '#1e40af' },
+    { name: 'Indeed', icon: 'search', color: '#92400e' },
+    { name: 'ZipRecruiter', icon: 'zap', color: '#166534' },
+    { name: 'Google Jobs', icon: 'globe', color: '#7e22ce' },
     { name: 'Greenhouse', icon: 'leaf', color: '#065f46' },
     { name: 'Lever', icon: 'arrow-up-right', color: '#1e40af' },
-    { name: 'Remotive', icon: 'globe', color: '#166534' },
-    { name: 'Arbeitnow', icon: 'briefcase', color: '#92400e' },
   ];
 
   return (
@@ -207,11 +218,11 @@ export default function HomeScreen({ navigation }) {
           </Card>
         </View>
 
-        {/* Trending Jobs Section */}
+        {/* Latest Jobs Section */}
         <View style={styles.trendingHeader}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <Eyebrow>TRENDING JOBS</Eyebrow>
-            {loadingTrending && (
+            <Eyebrow>LATEST JOBS</Eyebrow>
+            {loadingLatest && (
               <ActivityIndicator size="small" color={theme.colors.accent} />
             )}
           </View>
@@ -225,20 +236,20 @@ export default function HomeScreen({ navigation }) {
           </TouchableOpacity>
         </View>
 
-        {trendingJobs.length > 0 ? (
+        {latestJobs.length > 0 ? (
           <View style={styles.trendingList}>
-            {trendingJobs.map(job => (
-              <TrendingJobCard
+            {latestJobs.map(job => (
+              <LatestJobCard
                 key={job.id}
                 job={job}
                 onPress={() => navigation.navigate('Browser', { url: job.applyUrl })}
               />
             ))}
           </View>
-        ) : !loadingTrending ? (
+        ) : !loadingLatest ? (
           <View style={styles.trendingEmpty}>
-            <Icon name="briefcase" size={20} color={theme.colors.faint} />
-            <Text style={styles.trendingEmptyText}>Jobs loading…</Text>
+            <Icon name="clock" size={20} color={theme.colors.faint} />
+            <Text style={styles.trendingEmptyText}>No recent jobs found</Text>
           </View>
         ) : null}
 

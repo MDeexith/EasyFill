@@ -10,11 +10,13 @@ import { getBackendUrl } from './backend';
  * @param {string[]} [opts.sources] - Array of sources to include
  * @returns {{ jobs, total, page, perPage, hasMore }}
  */
-export async function fetchJobFeed({ search, category, page = 1, sources } = {}) {
+export async function fetchJobFeed({ search, category, location, page = 1, sources, isRemote } = {}) {
   const params = { page };
   if (search) params.search = search;
   if (category && category !== 'All') params.category = category;
+  if (location) params.location = location;
   if (sources && sources.length > 0) params.sources = sources.join(',');
+  if (isRemote) params.is_remote = true;
 
   const res = await axios.get(`${getBackendUrl()}/jobs/feed`, {
     params,

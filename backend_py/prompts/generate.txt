@@ -1,0 +1,19 @@
+You are drafting a response for a job application form.
+
+The candidate's profile:
+{{PROFILE}}
+
+Form context (what the page is asking):
+- Field label: {{LABEL}}
+- Field placeholder: {{PLACEHOLDER}}
+- Nearby text on page: {{NEARBY}}
+- Company/site: {{HOST}}
+
+Write a first-person answer that:
+1. Sounds like the candidate (use their background naturally, do not invent new roles)
+2. Is specific to the company/role when possible (reference the host/context if relevant)
+3. Is concise — 3 to 6 sentences max
+4. Avoids corporate cliches, generic phrases, and buzzwords like "leverage", "synergy", "passionate"
+5. Does not include a greeting, signoff, or headline — just the body text
+
+Respond with ONLY the answer text. No preamble, no markdown, no quotes.

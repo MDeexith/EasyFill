@@ -11,6 +11,7 @@ import {
   Animated,
   Keyboard,
   ScrollView,
+  unstable_batchedUpdates,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Icon from '../components/Icon';
@@ -25,6 +26,10 @@ const SOURCES = [
   { key: 'lever', label: 'Lever', icon: 'arrow-up-right', bg: '#eff6ff', fg: '#1e40af' },
   { key: 'remotive', label: 'Remotive', icon: 'globe', bg: '#f0fdf4', fg: '#166534' },
   { key: 'arbeitnow', label: 'Arbeitnow', icon: 'briefcase', bg: '#fef3c7', fg: '#92400e' },
+  { key: 'linkedin', label: 'LinkedIn', icon: 'briefcase', bg: '#eff6ff', fg: '#1e40af' },
+  { key: 'indeed', label: 'Indeed', icon: 'search', bg: '#fef3c7', fg: '#92400e' },
+  { key: 'zip_recruiter', label: 'ZipRecruiter', icon: 'zap', bg: '#f0fdf4', fg: '#166534' },
+  { key: 'google', label: 'Google Jobs', icon: 'globe', bg: '#fdf4ff', fg: '#7e22ce' },
 ];
 
 const CATEGORIES = [
@@ -33,10 +38,14 @@ const CATEGORIES = [
 ];
 
 const SOURCE_BADGE = {
-  greenhouse: { bg: '#ecfdf5', fg: '#065f46', label: 'Greenhouse' },
-  lever: { bg: '#eff6ff', fg: '#1e40af', label: 'Lever' },
-  remotive: { bg: '#f0fdf4', fg: '#166534', label: 'Remotive' },
-  arbeitnow: { bg: '#fef3c7', fg: '#92400e', label: 'Arbeitnow' },
+  greenhouse:    { bg: '#ecfdf5', fg: '#065f46', label: 'Greenhouse' },
+  lever:         { bg: '#eff6ff', fg: '#1e40af', label: 'Lever' },
+  remotive:      { bg: '#f0fdf4', fg: '#166534', label: 'Remotive' },
+  arbeitnow:     { bg: '#fef3c7', fg: '#92400e', label: 'Arbeitnow' },
+  linkedin:      { bg: '#eff6ff', fg: '#1e40af', label: 'LinkedIn' },
+  indeed:        { bg: '#fef3c7', fg: '#92400e', label: 'Indeed' },
+  zip_recruiter: { bg: '#f0fdf4', fg: '#166534', label: 'ZipRecruiter' },
+  google:        { bg: '#fdf4ff', fg: '#7e22ce', label: 'Google Jobs' },
 };
 
 const ROLE_ICONS = {
@@ -148,6 +157,8 @@ export default function JobFeedScreen({ navigation }) {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [selectedSource, setSelectedSource] = useState('all');
   const [selectedCategory, setSelectedCategory] = useState('All');
+  const [locationFilter, setLocationFilter] = useState('');
+  const [locationChip, setLocationChip] = useState('India');
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [totalCount, setTotalCount] = useState(0);
@@ -159,51 +170,62 @@ export default function JobFeedScreen({ navigation }) {
     return () => clearTimeout(timer);
   }, [search]);
 
+  const activeLocation = locationChip !== 'Any' ? locationChip : locationFilter.trim();
+  const loadingRef = useRef(false);
+
   const loadJobs = useCallback(async (opts = {}) => {
     const { isRefresh = false, isLoadMore = false, pageNum = 1 } = opts;
-    if (loading && !isRefresh) return;
+    if (loadingRef.current && !isRefresh) return;
 
-    if (isRefresh) setRefreshing(true);
-    else if (!isLoadMore) setLoading(true);
-
-    setError(null);
+    loadingRef.current = true;
+    unstable_batchedUpdates(() => {
+      if (isRefresh) setRefreshing(true);
+      else if (!isLoadMore) setLoading(true);
+      setError(null);
+    });
 
     try {
       const sources = selectedSource === 'all' ? undefined : [selectedSource];
+      const loc = locationChip !== 'Any' ? locationChip : locationFilter.trim();
+      const isRemote = locationChip === 'Remote';
       const result = await fetchJobFeed({
         search: debouncedSearch,
         category: selectedCategory,
+        location: loc || undefined,
         page: pageNum,
         sources,
+        isRemote,
       });
 
       const newJobs = result.jobs || [];
-      if (isLoadMore) {
-        setJobs(prev => [...prev, ...newJobs]);
-      } else {
-        setJobs(newJobs);
-        saveFeedJobs(newJobs);
-      }
-      setHasMore(result.hasMore || false);
-      setTotalCount(result.total || 0);
-      setPage(pageNum);
+      unstable_batchedUpdates(() => {
+        if (isLoadMore) {
+          setJobs(prev => [...prev, ...newJobs]);
+        } else {
+          setJobs(newJobs);
+          saveFeedJobs(newJobs);
+        }
+        setHasMore(result.hasMore || false);
+        setTotalCount(result.total || 0);
+        setPage(pageNum);
+        setLoading(false);
+        setRefreshing(false);
+      });
     } catch (e) {
-      setError('Failed to load jobs. Check your connection.');
-      // Fall back to cached
-      if (!isLoadMore) {
-        const cached = loadFeedJobs();
-        if (cached.length > 0) setJobs(cached);
-      }
+      unstable_batchedUpdates(() => {
+        setError('Failed to load jobs. Check your connection.');
+        setLoading(false);
+        setRefreshing(false);
+      });
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      loadingRef.current = false;
     }
-  }, [debouncedSearch, selectedSource, selectedCategory, loading]);
+  }, [debouncedSearch, selectedSource, selectedCategory, locationChip, locationFilter]);
 
   // Initial load and on filter change
   useEffect(() => {
     loadJobs({ isRefresh: false });
-  }, [debouncedSearch, selectedSource, selectedCategory]);
+  }, [debouncedSearch, selectedSource, selectedCategory, locationChip, locationFilter]);
 
   const handleRefresh = useCallback(() => {
     loadJobs({ isRefresh: true });
@@ -215,10 +237,14 @@ export default function JobFeedScreen({ navigation }) {
   }, [hasMore, loading, page, loadJobs]);
 
   const filteredJobs = useMemo(() => {
-    // Additional client-side filtering for categories local to Greenhouse/Lever
-    // (Remotive/Arbeitnow already filtered server-side)
-    return jobs;
-  }, [jobs]);
+    const loc = activeLocation.toLowerCase();
+    if (!loc) return jobs;
+    return jobs.filter(j => {
+      const jloc = (j.location || '').toLowerCase();
+      if (loc === 'remote') return jloc.includes('remote') || jloc === '';
+      return jloc.includes(loc);
+    });
+  }, [jobs, activeLocation]);
 
   const renderJobCard = useCallback(({ item }) => (
     <JobCard
@@ -250,6 +276,47 @@ export default function JobFeedScreen({ navigation }) {
             </TouchableOpacity>
           )}
         </View>
+      </View>
+
+      {/* Location filter */}
+      <View style={styles.locationWrap}>
+        <View style={styles.locationBar}>
+          <Icon name="map-pin" size={14} color={theme.colors.muted} />
+          <TextInput
+            style={styles.locationInput}
+            placeholder="Location…"
+            placeholderTextColor={theme.colors.faint}
+            value={locationFilter}
+            onChangeText={v => { setLocationFilter(v); setLocationChip('Any'); }}
+            autoCapitalize="words"
+            autoCorrect={false}
+            returnKeyType="search"
+            onSubmitEditing={() => Keyboard.dismiss()}
+          />
+          {locationFilter.length > 0 && (
+            <TouchableOpacity onPress={() => setLocationFilter('')} activeOpacity={0.7}>
+              <Icon name="close" size={14} color={theme.colors.muted} />
+            </TouchableOpacity>
+          )}
+        </View>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.locChipRow}>
+          {['Any', 'Remote', 'USA', 'India', 'UK', 'Canada', 'Europe', 'Australia'].map(chip => {
+            const isActive = locationChip === chip && !locationFilter;
+            return (
+              <TouchableOpacity
+                key={chip}
+                onPress={() => { setLocationChip(chip); setLocationFilter(''); }}
+                activeOpacity={0.7}
+                style={[styles.locChip, isActive && styles.locChipActive]}
+              >
+                {chip === 'Remote' && (
+                  <Icon name="wifi" size={11} color={isActive ? theme.colors.accentInk : theme.colors.muted} strokeWidth={2} />
+                )}
+                <Text style={[styles.locChipText, isActive && styles.locChipTextActive]}>{chip}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
       </View>
 
       {/* Source filter */}
@@ -355,8 +422,8 @@ export default function JobFeedScreen({ navigation }) {
         </View>
         <Text style={styles.emptyTitle}>No jobs found</Text>
         <Text style={styles.emptyBody}>
-          {search
-            ? 'Try adjusting your search or filter criteria.'
+          {search || activeLocation
+            ? 'Try adjusting search, location, or category filters.'
             : 'Pull down to refresh or try a different source.'}
         </Text>
       </View>
@@ -470,6 +537,52 @@ const styles = StyleSheet.create({
     fontFamily: theme.font.sans,
     color: theme.colors.ink,
     padding: 0,
+  },
+
+  // Location filter
+  locationWrap: { paddingHorizontal: 16, paddingBottom: 4, gap: 6 },
+  locationBar: {
+    height: 38,
+    borderRadius: 10,
+    backgroundColor: theme.colors.surface2,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  locationInput: {
+    flex: 1,
+    fontSize: 13,
+    fontFamily: theme.font.sans,
+    color: theme.colors.ink,
+    padding: 0,
+  },
+  locChipRow: { gap: 6, paddingBottom: 2 },
+  locChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    height: 28,
+    paddingHorizontal: 11,
+    borderRadius: 14,
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+  },
+  locChipActive: {
+    backgroundColor: theme.colors.accentSoft,
+    borderColor: theme.colors.accent,
+  },
+  locChipText: {
+    fontSize: 11,
+    fontFamily: theme.font.sans,
+    fontWeight: '600',
+    color: theme.colors.muted,
+  },
+  locChipTextActive: {
+    color: theme.colors.accentInk,
   },
 
   // Source filter
