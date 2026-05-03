@@ -434,6 +434,60 @@ async def fetch_arbeitnow_jobs(page: int = 1) -> list:
         return []
 
 
+# ── Source test routes ────────────────────────────────────────────────
+
+@router.get("/sources/adzuna")
+async def source_adzuna(
+    search: str = Query(default=""),
+    location: str = Query(default=""),
+    country: str = Query(default="in", description="Country code: in, us, gb, au"),
+):
+    jobs = await fetch_adzuna_jobs(search, location, country)
+    return {"source": "adzuna", "count": len(jobs), "jobs": jobs}
+
+
+@router.get("/sources/jobicy")
+async def source_jobicy(
+    search: str = Query(default=""),
+    count: int = Query(default=50),
+):
+    jobs = await fetch_jobicy_jobs(search, count)
+    return {"source": "jobicy", "count": len(jobs), "jobs": jobs}
+
+
+@router.get("/sources/greenhouse")
+async def source_greenhouse(
+    company: str = Query(description="Greenhouse board token e.g. 'stripe', 'figma'"),
+):
+    jobs = await fetch_greenhouse_jobs(company)
+    return {"source": "greenhouse", "company": company, "count": len(jobs), "jobs": jobs}
+
+
+@router.get("/sources/lever")
+async def source_lever(
+    company: str = Query(description="Lever company handle e.g. 'anthropic', 'netflix'"),
+):
+    jobs = await fetch_lever_jobs(company)
+    return {"source": "lever", "company": company, "count": len(jobs), "jobs": jobs}
+
+
+@router.get("/sources/remotive")
+async def source_remotive(
+    search: str = Query(default=""),
+    category: str = Query(default="", description="Engineering, Design, Product, Marketing, Sales, Data, Support, Operations"),
+):
+    jobs = await fetch_remotive_jobs(search, category)
+    return {"source": "remotive", "count": len(jobs), "jobs": jobs}
+
+
+@router.get("/sources/arbeitnow")
+async def source_arbeitnow(
+    page: int = Query(default=1),
+):
+    jobs = await fetch_arbeitnow_jobs(page)
+    return {"source": "arbeitnow", "count": len(jobs), "jobs": jobs}
+
+
 # ── Routes ─────────────────────────────────────────────────────────────
 
 @router.get("/feed")

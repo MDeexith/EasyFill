@@ -485,6 +485,95 @@ Content-Type: application/json
 
 ---
 
+## 10. Source Test Routes
+
+Individual routes to test each non-JobSpy job source in isolation. Each returns the raw job list from that source plus a count.
+
+### `GET /jobs/sources/adzuna`
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `search` | `string` | `""` | Keyword search |
+| `location` | `string` | `""` | City or region |
+| `country` | `string` | `"in"` | Country code: `in`, `us`, `gb`, `au` |
+
+```
+GET /jobs/sources/adzuna?search=android&location=Bangalore
+```
+
+---
+
+### `GET /jobs/sources/jobicy`
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `search` | `string` | `""` | Tag/keyword filter |
+| `count` | `integer` | `50` | Number of results |
+
+```
+GET /jobs/sources/jobicy?search=python&count=20
+```
+
+---
+
+### `GET /jobs/sources/greenhouse`
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `company` | `string` | ✅ | Greenhouse board token e.g. `stripe`, `figma` |
+
+```
+GET /jobs/sources/greenhouse?company=stripe
+```
+
+---
+
+### `GET /jobs/sources/lever`
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `company` | `string` | ✅ | Lever company handle e.g. `anthropic`, `netflix` |
+
+```
+GET /jobs/sources/lever?company=anthropic
+```
+
+---
+
+### `GET /jobs/sources/remotive`
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `search` | `string` | `""` | Keyword search |
+| `category` | `string` | `""` | `Engineering`, `Design`, `Product`, `Marketing`, `Sales`, `Data`, `Support`, `Operations` |
+
+```
+GET /jobs/sources/remotive?category=Engineering&search=backend
+```
+
+---
+
+### `GET /jobs/sources/arbeitnow`
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `page` | `integer` | `1` | Page number |
+
+```
+GET /jobs/sources/arbeitnow?page=1
+```
+
+**All source routes return:**
+```json
+{
+  "source": "adzuna",
+  "count": 42,
+  "jobs": [ ... ]
+}
+```
+
+---
+
 ## Environment Variables
 
 | Variable | Required | Description |
