@@ -226,14 +226,19 @@ async def fetch_greenhouse_jobs(board_token: str) -> list:
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            res = await client.get(f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs")
+            res = await client.get(
+                f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs",
+                params={"content": "true"},
+            )
             res.raise_for_status()
             data = res.json()
 
         jobs = []
         for j in data.get("jobs", []):
             dept = (j.get("departments") or [{}])[0].get("name", "")
-            loc = j.get("location", {}).get("name", "")
+            # offices[0].location is a full string e.g. "New York, NY, United States"
+            offices = j.get("offices") or []
+            loc = (offices[0].get("location") or offices[0].get("name", "")) if offices else j.get("location", {}).get("name", "")
             jobs.append({
                 "id": f"gh_{board_token}_{j['id']}",
                 "title": j.get("title", ""),
