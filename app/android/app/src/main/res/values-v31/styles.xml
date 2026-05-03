@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!--
+      Android 12+ (API 31) splash screen overrides.
+      Ensures the system-generated splash has a dark background matching the
+      icon, and uses our vector foreground so it stays crisp at any density.
+    -->
+    <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:editTextBackground">@drawable/rn_edit_text_material</item>
+
+        <!-- Splash screen background — matches ic_launcher_background (#0a0a0a) -->
+        <item name="android:windowSplashScreenBackground">@color/ic_launcher_background</item>
+
+        <!-- Use our crisp vector foreground directly as the splash icon -->
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+
+        <!-- Icon background behind the foreground layer (same dark colour) -->
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/ic_launcher_background</item>
+    </style>
+
+</resources>

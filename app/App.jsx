@@ -1,10 +1,11 @@
-import React, { useMemo } from 'react';
+import React from 'react';
 import { StatusBar, View, Text } from 'react-native';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
+import LogoSplashScreen from './src/screens/LogoSplashScreen';
 import SplashScreen from './src/screens/SplashScreen';
 import UploadScreen from './src/screens/UploadScreen';
 import ConfirmScreen from './src/screens/ConfirmScreen';
@@ -98,7 +99,8 @@ function MainTabs() {
 }
 
 export default function App() {
-  const initialRoute = useMemo(() => (isOnboarded() ? 'Main' : 'Splash'), []);
+  // Always start at the logo splash; it resolves to Main or Splash internally
+  const initialRoute = 'LogoSplash';
   return (
     <SafeAreaProvider>
       <StatusBar barStyle="dark-content" backgroundColor={theme.colors.bg} />
@@ -107,6 +109,7 @@ export default function App() {
           initialRouteName={initialRoute}
           screenOptions={{ headerShown: false, animation: 'fade' }}
         >
+          <RootStack.Screen name="LogoSplash" component={LogoSplashScreen} />
           <RootStack.Screen name="Splash" component={SplashScreen} />
           <RootStack.Screen name="Upload" component={UploadScreen} />
           <RootStack.Screen name="Confirm" component={ConfirmScreen} />

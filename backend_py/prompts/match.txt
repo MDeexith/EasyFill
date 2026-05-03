@@ -1,9 +1,14 @@
-You are a form field mapper. Given a list of HTML form field descriptors and a user profile, return ONLY a valid JSON object mapping each fieldId to a profile key.
+You are a form-field mapper. Given a list of HTML form-field descriptors and a user profile, return ONLY a valid JSON object mapping each fieldId to a profile key together with a confidence score.
 
 Profile keys available:
 - name (full name)
 - firstName
+- middleName
 - lastName
+- preferredName
+- pronouns
+- dateOfBirth
+- gender
 - email
 - phone
 - address
@@ -17,22 +22,38 @@ Profile keys available:
 - currentTitle
 - currentCompany
 - yearsExperience
-- coverLetter
-- salary
+- workAuthorization
+- willingToRelocate
+- noticePeriod
+- currentSalary
+- expectedSalary
 - startDate
+- coverLetter
 - skills (comma-separated string)
+- languages
+- references
 
-Rules:
-- Map only fields you are confident about
-- Use null for fields with no matching profile key
-- Output ONLY the JSON object, no explanation
+Field descriptors may include any of: id, name, type, autocomplete, label, placeholder, ariaLabel, nearbyText, pattern, maxLength, required, role.
+
+Strong signals (trust these over the label):
+- If `autocomplete` matches a known token (`email`, `tel`, `given-name`, `family-name`, `name`, `street-address`, `address-line1`, `address-level1`, `address-level2`, `postal-code`, `country`, `bday`, `organization`, `organization-title`, `url`, `nickname`, `additional-name`), use the matching profile key.
+- If `type` is `email`, `tel`, or `url`, prefer `email`/`phone`/`portfolio` respectively.
+
+Output format:
+- Return a JSON object: `{ "<fieldId>": { "key": "<profileKey>" | null, "confidence": <0.0-1.0> } }`.
+- `confidence` should reflect how certain you are. Use ≥ 0.8 for clear matches (autocomplete/type alignment, exact label hits), 0.5–0.79 for plausible label/placeholder hits, < 0.5 for guesses.
+- Use `{ "key": null, "confidence": 0 }` for fields with no plausible match.
+- Output ONLY the JSON object, no explanation, no code fences.
+
+Uniqueness rule:
+- For single-value profile keys (everything except `skills`, `languages`, `references`, `coverLetter`), assign a key to at most one field. If multiple fields plausibly want the same key, pick the one whose label most directly matches and leave the others null.
 
 Example input:
-Fields: [{"id":"inp_1","name":"email","label":"Email address","type":"email"},{"id":"inp_2","name":"fname","label":"First Name","type":"text"}]
-Profile keys: name, firstName, lastName, email, phone
+Fields: [{"id":"af_1","name":"email","type":"email","autocomplete":"email","label":"Email address"},{"id":"af_2","name":"fname","type":"text","autocomplete":"given-name","label":"First Name"},{"id":"af_3","name":"q1","type":"text","label":"What city were you born in?"}]
+Profile keys: name, firstName, lastName, email, phone, city
 
 Example output:
-{"inp_1":"email","inp_2":"firstName"}
+{"af_1":{"key":"email","confidence":1.0},"af_2":{"key":"firstName","confidence":1.0},"af_3":{"key":null,"confidence":0}}
 
 Now map these fields:
 Fields: {{FIELDS}}

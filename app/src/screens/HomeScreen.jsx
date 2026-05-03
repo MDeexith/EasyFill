@@ -7,12 +7,12 @@ import {
   TextInput,
   TouchableOpacity,
   FlatList,
-  Alert,
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { Card, Eyebrow, T } from '../components/ui';
+import AppDialog, { useDialog } from '../components/AppDialog';
 import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
 import { loadProfile, loadFeedJobs, saveFeedJobs } from '../profile/store';
@@ -105,6 +105,7 @@ export default function HomeScreen({ navigation }) {
   const [profile, setProfile] = useState(() => loadProfile());
   const [latestJobs, setLatestJobs] = useState(() => filterLatestJobs(loadFeedJobs()).slice(0, 6));
   const [loadingLatest, setLoadingLatest] = useState(false);
+  const { show, dialogProps } = useDialog();
 
   useFocusEffect(
     useCallback(() => {
@@ -140,13 +141,17 @@ export default function HomeScreen({ navigation }) {
   const handleOpen = useCallback(() => {
     const trimmed = url.trim();
     if (!trimmed) {
-      Alert.alert('Enter a URL', 'Paste a job application URL.');
+      show({
+        title: 'Enter a URL',
+        message: 'Paste a job application URL to open it in the browser.',
+        buttons: [{ text: 'OK' }],
+      });
       return;
     }
     const fullUrl = trimmed.startsWith('http') ? trimmed : `https://${trimmed}`;
     setUrl('');
     navigation.navigate('Browser', { url: fullUrl });
-  }, [url, navigation]);
+  }, [url, navigation, show]);
 
   const firstName = profile.firstName || profile.name || 'there';
   const hour = new Date().getHours();
@@ -284,6 +289,8 @@ export default function HomeScreen({ navigation }) {
           ))}
         </View>
       </ScrollView>
+
+      <AppDialog {...dialogProps} />
     </SafeAreaView>
   );
 }

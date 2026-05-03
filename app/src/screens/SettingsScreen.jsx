@@ -1,17 +1,20 @@
 import React, { useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Eyebrow } from '../components/ui';
+import AppDialog, { useDialog } from '../components/AppDialog';
 import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
 import { clearProfile, saveHistory, setOnboarded, clearFeedJobs } from '../profile/store';
 
 export default function SettingsScreen({ navigation }) {
+  const { show, dialogProps } = useDialog();
+
   const resetAll = useCallback(() => {
-    Alert.alert(
-      'Reset all data?',
-      'Clears your profile and history, and returns to onboarding. This cannot be undone.',
-      [
+    show({
+      title: 'Reset all data?',
+      message: 'Clears your profile and history, and returns to onboarding. This cannot be undone.',
+      buttons: [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Reset',
@@ -25,9 +28,9 @@ export default function SettingsScreen({ navigation }) {
             root?.reset({ index: 0, routes: [{ name: 'Splash' }] });
           },
         },
-      ]
-    );
-  }, [navigation]);
+      ],
+    });
+  }, [navigation, show]);
 
   const ITEMS = [
     {
@@ -54,23 +57,23 @@ export default function SettingsScreen({ navigation }) {
           icon: 'shield',
           label: 'Your data',
           sub: 'Stored locally on your device',
-          onPress: () => {
-            Alert.alert(
-              'Your data',
+          onPress: () => show({
+            title: 'Your data',
+            message:
               'Your profile and history are stored only on this device. When you autofill a page, field labels are sent to our private AI model to pick the right matches — never your page content, never your profile values themselves.',
-            );
-          },
+            buttons: [{ text: 'Got it' }],
+          }),
         },
         {
           icon: 'sparkles',
           label: 'How AI assist works',
           sub: 'Smart matching + text drafting',
-          onPress: () => {
-            Alert.alert(
-              'AI assist',
+          onPress: () => show({
+            title: 'AI assist',
+            message:
               'Our on-call AI reads each form\'s labels and decides which of your saved fields fits where. For long answers like "Why this role?", the AI drafts an answer from your profile that you can edit before submitting.',
-            );
-          },
+            buttons: [{ text: 'Got it' }],
+          }),
         },
       ],
     },
@@ -131,6 +134,8 @@ export default function SettingsScreen({ navigation }) {
 
         <Text style={styles.version}>easyfill · v1.0.0</Text>
       </ScrollView>
+
+      <AppDialog {...dialogProps} />
     </SafeAreaView>
   );
 }

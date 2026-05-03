@@ -4,8 +4,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Btn, Eyebrow, T } from '../components/ui';
 import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
+import { loadProfile } from '../profile/store';
+import AppDialog, { useDialog } from '../components/AppDialog';
 
 export default function SplashScreen({ navigation }) {
+  const { show, dialogProps } = useDialog();
+
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       BackHandler.exitApp();
@@ -44,13 +48,26 @@ export default function SplashScreen({ navigation }) {
           </Btn>
           <Btn
             variant="ghost"
-            onPress={() => navigation.replace('Main')}
+            onPress={() => {
+              const profile = loadProfile();
+              const hasName = !!(profile.firstName?.trim() || profile.name?.trim());
+              if (hasName) {
+                navigation.replace('Main');
+              } else {
+                show({
+                  title: 'No profile found',
+                  message: "You don't have a profile yet. Upload your resume to get started.",
+                  buttons: [{ text: 'Get started', onPress: () => navigation.replace('Upload') }],
+                });
+              }
+            }}
             style={{ marginTop: 10, height: 44 }}
           >
             I already have a profile
           </Btn>
         </View>
       </View>
+      <AppDialog {...dialogProps} />
     </SafeAreaView>
   );
 }
