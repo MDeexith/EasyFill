@@ -10,6 +10,8 @@ import {
   Platform,
   BackHandler,
   Linking,
+  PanResponder,
+  useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import WebView from 'react-native-webview';
@@ -57,6 +59,41 @@ export default function BrowserScreen({ route, navigation }) {
   const urlRef = useRef(url);
   const titleRef = useRef('');
 
+  const { width: screenW, height: screenH } = useWindowDimensions();
+  const FAB_W = 180;
+  const FAB_H = 46;
+
+  const fabPos = useRef({ x: screenW - FAB_W - 14, y: screenH - FAB_H - 22 - 44 });
+  const fabPan = useRef(new Animated.ValueXY(fabPos.current)).current;
+  const isDragging = useRef(false);
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 4 || Math.abs(g.dy) > 4,
+      onPanResponderGrant: () => {
+        isDragging.current = false;
+        fabPan.setOffset({ x: fabPos.current.x, y: fabPos.current.y });
+        fabPan.setValue({ x: 0, y: 0 });
+      },
+      onPanResponderMove: (_, g) => {
+        isDragging.current = Math.abs(g.dx) > 6 || Math.abs(g.dy) > 6;
+        fabPan.setValue({ x: g.dx, y: g.dy });
+      },
+      onPanResponderRelease: (_, g) => {
+        fabPan.flattenOffset();
+        const clampedX = Math.max(8, Math.min(fabPos.current.x + g.dx, screenW - FAB_W - 8));
+        const clampedY = Math.max(8, Math.min(fabPos.current.y + g.dy, screenH - FAB_H - 80));
+        fabPos.current = { x: clampedX, y: clampedY };
+        Animated.spring(fabPan, {
+          toValue: { x: clampedX, y: clampedY },
+          useNativeDriver: false,
+          tension: 60,
+          friction: 8,
+        }).start();
+      },
+    })
+  ).current;
 
   const fabAnim = useRef(new Animated.Value(0)).current;
   const panelAnim = useRef(new Animated.Value(0)).current;
@@ -69,7 +106,7 @@ export default function BrowserScreen({ route, navigation }) {
     const shouldShowFab = phase === 'detected' || phase === 'filled' || phase === 'no-fields';
     Animated.spring(fabAnim, {
       toValue: shouldShowFab ? 1 : 0,
-      useNativeDriver: true,
+      useNativeDriver: false,
       tension: 60,
       friction: 8,
     }).start();
@@ -167,20 +204,35 @@ export default function BrowserScreen({ route, navigation }) {
     const host = getHostname(urlRef.current);
     const drafts = {};
 
-    for (let i = 0; i < longs.length; i++) {
-      const f = longs[i];
-      try {
-        const text = await generateText({
-          profile,
-          label: f.label || f.ariaLabel || f.nearbyText || '',
-          placeholder: f.placeholder || '',
-          nearby: f.nearbyText || '',
-          host,
-        });
-        if (text) drafts[f.id] = text;
-      } catch {}
-      setDraftProgress({ current: i + 1, total: longs.length });
+    // Worker-pool: at most DRAFT_CONCURRENCY generate calls in flight at a
+    // time. Sequential awaits caused N×latency wall time; full Promise.all
+    // would burst the OpenRouter free-tier rate limit on long forms.
+    const DRAFT_CONCURRENCY = 4;
+    let nextIdx = 0;
+    let completed = 0;
+
+    async function worker() {
+      while (true) {
+        const i = nextIdx++;
+        if (i >= longs.length) return;
+        const f = longs[i];
+        try {
+          const text = await generateText({
+            profile,
+            label: f.label || f.ariaLabel || f.nearbyText || '',
+            placeholder: f.placeholder || '',
+            nearby: f.nearbyText || '',
+            host,
+          });
+          if (text) drafts[f.id] = text;
+        } catch {}
+        completed += 1;
+        setDraftProgress({ current: completed, total: longs.length });
+      }
     }
+
+    const workerCount = Math.min(DRAFT_CONCURRENCY, longs.length);
+    await Promise.all(Array.from({ length: workerCount }, worker));
 
     if (Object.keys(drafts).length > 0) {
       const script = buildDirectFillScript(drafts);
@@ -350,7 +402,7 @@ export default function BrowserScreen({ route, navigation }) {
           onLoadStart={() => { setLoading(true); setPhase('loading'); setFields([]); setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 }); }}
           onLoadEnd={() => {
             setLoading(false);
-            lastInjectedUrl.current = currentUrl;
+            lastInjectedUrl.current = urlRef.current;
             webViewRef.current?.injectJavaScript(FORM_SCANNER_JS + '; true;');
           }}
           onNavigationStateChange={state => {
@@ -390,9 +442,12 @@ export default function BrowserScreen({ route, navigation }) {
 
         {(phase === 'detected' || phase === 'filled' || phase === 'no-fields') && (
           <Animated.View
+            {...panResponder.panHandlers}
             style={[
               styles.fab,
               {
+                left: fabPan.x,
+                top: fabPan.y,
                 opacity: fabAnim,
                 transform: [{
                   translateY: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }),
@@ -403,7 +458,10 @@ export default function BrowserScreen({ route, navigation }) {
             <TouchableOpacity
               activeOpacity={0.85}
               style={styles.fabBtn}
-              onPress={() => phase === 'no-fields' ? manualRescan() : setPhase('panel')}
+              onPress={() => {
+                if (isDragging.current) return;
+                phase === 'no-fields' ? manualRescan() : setPhase('panel');
+              }}
             >
               <View style={styles.fabDot}>
                 <Icon
@@ -581,8 +639,6 @@ const styles = StyleSheet.create({
   },
   fab: {
     position: 'absolute',
-    right: 14,
-    bottom: 22,
   },
   fabBtn: {
     height: 46,
