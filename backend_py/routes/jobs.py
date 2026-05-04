@@ -335,8 +335,7 @@ async def jobs_feed(
     country: str = Query(default="in", description="'in'=India (default), 'us'/'gb'/etc, 'global'"),
     is_remote: bool = Query(default=False),
     job_type: Optional[str] = Query(default=None),
-    experience: Optional[int] = Query(default=None, description="Years of experience (0=fresher, 1-2=junior, 3-5=mid, 6-9=senior, 10+=lead)"),
-    sources: str = Query(default="", description="Opt-in legacy sources: greenhouse,remotive"),
+    experience: Optional[int] = Query(default=None),
 ):
     search_q = search.lower().strip()
     # experience is accepted but not applied to JobSpy — reserved for other platforms
@@ -358,16 +357,11 @@ async def jobs_feed(
             job_type=job_type,
         ))
 
-    # Live API sources — always called fresh (fast REST, 15-min cache)
+    # Always-on sources
     tasks.append(fetch_jobicy_jobs(search_q))
-
-    # Optional legacy board sources (explicit opt-in via ?sources=greenhouse,remotive)
-    extra = [s.strip().lower() for s in sources.split(",") if s.strip()]
-    if "greenhouse" in extra:
-        for co in GREENHOUSE_COMPANIES[:15] + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"]:
-            tasks.append(fetch_greenhouse_jobs(co))
-    if "remotive" in extra:
-        tasks.append(fetch_remotive_jobs(search_q, category))
+    tasks.append(fetch_remotive_jobs(search_q, category))
+    for co in GREENHOUSE_COMPANIES[:15] + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"]:
+        tasks.append(fetch_greenhouse_jobs(co))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -390,7 +384,7 @@ async def jobs_feed(
 
     all_jobs.sort(key=lambda j: _parse_date(j["postedDate"]), reverse=True)
 
-    per_page = 50
+    per_page = 20
     start = (page - 1) * per_page
 
     return {

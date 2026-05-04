@@ -273,7 +273,6 @@ Returns aggregated job listings from multiple sources. JobSpy results (Indeed, L
 | `country` | `string` | `"in"` | `"in"` = India (default), `"us"`, `"gb"`, `"au"`, `"global"` |
 | `is_remote` | `boolean` | `false` | Filter for remote jobs only |
 | `job_type` | `string` | `null` | `fulltime`, `parttime`, `internship`, `contract` |
-| `sources` | `string` | `""` | Opt-in legacy sources (comma-separated): `greenhouse`, `remotive` |
 
 **Sample requests:**
 ```
@@ -282,7 +281,7 @@ GET /jobs/feed?search=android+developer&location=Bangalore
 GET /jobs/feed?category=Engineering&country=in&page=2
 GET /jobs/feed?search=frontend&is_remote=true&job_type=fulltime
 GET /jobs/feed?country=us&search=data+scientist&location=New+York
-GET /jobs/feed?sources=greenhouse&search=backend
+GET /jobs/feed?search=backend
 ```
 
 **Response:**
@@ -292,7 +291,7 @@ GET /jobs/feed?sources=greenhouse&search=backend
 | `jobs` | `array` | Paginated list of job objects (max 50) |
 | `total` | `integer` | Total matched jobs across all sources |
 | `page` | `integer` | Current page |
-| `perPage` | `integer` | Items per page (always 50) |
+| `perPage` | `integer` | Items per page (always 20) |
 | `hasMore` | `boolean` | Whether more pages exist |
 
 **Job object:**
@@ -338,7 +337,7 @@ GET /jobs/feed?sources=greenhouse&search=backend
   ],
   "total": 143,
   "page": 1,
-  "perPage": 50,
+  "perPage": 20,
   "hasMore": true
 }
 ```
