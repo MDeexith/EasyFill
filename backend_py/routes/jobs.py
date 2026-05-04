@@ -24,12 +24,6 @@ GREENHOUSE_COMPANIES = [
     'webflow', 'doordash', 'brex', 'dbt-labs', 'anduril',
 ]
 
-LEVER_COMPANIES = [
-    'netflix', 'twitch', 'lever', 'postman', 'netlify',
-    'samsara', 'verkada', 'anthropic', 'wiz-inc', 'lucidmotors',
-    'navan', 'podium', 'earnin', 'hightouch', 'weights-and-biases',
-]
-
 custom_companies: list[dict] = []
 
 # ── JobSpy platforms ───────────────────────────────────────────────────
@@ -38,7 +32,7 @@ GLOBAL_PLATFORMS = ["indeed", "linkedin", "zip_recruiter", "google"]
 
 # ── Cache ──────────────────────────────────────────────────────────────
 _cache: dict[str, dict] = {}
-CACHE_TTL = 15 * 60          # 15 min — live API sources (Adzuna, Jobicy, etc.)
+CACHE_TTL = 15 * 60          # 15 min — live API sources (Jobicy, Greenhouse, etc.)
 SPY_CACHE_TTL = 3 * 60 * 60  # 3 h — JobSpy (query-based, populated on first request)
 
 
@@ -179,61 +173,6 @@ async def fetch_jobspy_platform(
 
 # ── Live API fetchers ──────────────────────────────────────────────────
 
-async def fetch_adzuna_jobs(search: str = "", location: str = "", country_code: str = "in") -> list:
-    app_id = os.environ.get("ADZUNA_APP_ID", "")
-    app_key = os.environ.get("ADZUNA_APP_KEY", "")
-    if not app_id or not app_key:
-        return []
-
-    cache_key = f"adzuna_{country_code}_{search}_{location}"
-    cached = get_cached(cache_key)
-    if cached is not None:
-        return cached
-
-    try:
-        params: dict = {
-            "app_id": app_id,
-            "app_key": app_key,
-            "results_per_page": 50,
-            "content-type": "application/json",
-        }
-        if search:
-            params["what"] = search
-        if location:
-            params["where"] = location
-
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            res = await client.get(
-                f"https://api.adzuna.com/v1/api/jobs/{country_code}/search/1",
-                params=params,
-            )
-            res.raise_for_status()
-            data = res.json()
-
-        country_label = {"in": "India", "us": "USA", "gb": "UK", "au": "Australia"}.get(country_code, country_code.upper())
-        jobs = []
-        for j in data.get("results", []):
-            loc = j.get("location", {}).get("display_name", "")
-            category = j.get("category", {}).get("label", "")
-            jobs.append({
-                "id": f"adzuna_{country_code}_{j['id']}",
-                "title": j.get("title", ""),
-                "company": j.get("company", {}).get("display_name", ""),
-                "department": category,
-                "category": categorize_role(j.get("title", ""), category),
-                "location": loc,
-                "applyUrl": j.get("redirect_url", ""),
-                "postedDate": j.get("created"),
-                "source": "adzuna",
-                "sourceLabel": f"Adzuna {country_label}",
-            })
-        set_cache(cache_key, jobs)
-        return jobs
-    except Exception as e:
-        print(f"[adzuna] error: {e}")
-        return []
-
-
 async def fetch_jobicy_jobs(search: str = "", count: int = 50) -> list:
     cache_key = f"jobicy_{search}_{count}"
     cached = get_cached(cache_key)
@@ -281,14 +220,19 @@ async def fetch_greenhouse_jobs(board_token: str) -> list:
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            res = await client.get(f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs")
+            res = await client.get(
+                f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs",
+                params={"content": "true"},
+            )
             res.raise_for_status()
             data = res.json()
 
         jobs = []
         for j in data.get("jobs", []):
             dept = (j.get("departments") or [{}])[0].get("name", "")
-            loc = j.get("location", {}).get("name", "")
+            # offices[0].location is a full string e.g. "New York, NY, United States"
+            offices = j.get("offices") or []
+            loc = (offices[0].get("location") or offices[0].get("name", "")) if offices else j.get("location", {}).get("name", "")
             jobs.append({
                 "id": f"gh_{board_token}_{j['id']}",
                 "title": j.get("title", ""),
@@ -307,56 +251,12 @@ async def fetch_greenhouse_jobs(board_token: str) -> list:
         return []
 
 
-async def fetch_lever_jobs(company_handle: str) -> list:
-    cache_key = f"lv_{company_handle}"
-    cached = get_cached(cache_key)
-    if cached is not None:
-        return cached
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            res = await client.get(f"https://api.lever.co/v0/postings/{company_handle}?mode=json")
-            res.raise_for_status()
-            postings = res.json()
-
-        if not isinstance(postings, list):
-            postings = []
-
-        jobs = []
-        for p in postings:
-            cats = p.get("categories") or {}
-            dept = cats.get("team") or cats.get("department") or ""
-            loc = cats.get("location", "")
-            commitment = cats.get("commitment", "")
-            created_at = p.get("createdAt")
-            posted = (
-                datetime.fromtimestamp(created_at / 1000, tz=timezone.utc).isoformat()
-                if created_at else None
-            )
-            jobs.append({
-                "id": f"lv_{company_handle}_{p['id']}",
-                "title": p.get("text", ""),
-                "company": p.get("company", company_handle),
-                "department": dept,
-                "category": categorize_role(p.get("text", ""), dept),
-                "location": f"{loc} · {commitment}" if commitment else loc,
-                "applyUrl": p.get("hostedUrl") or p.get("applyUrl") or "",
-                "postedDate": posted,
-                "source": "lever",
-                "sourceLabel": "Lever",
-            })
-        set_cache(cache_key, jobs)
-        return jobs
-    except Exception:
-        return []
-
-
 async def fetch_remotive_jobs(search: str = "", category: str = "") -> list:
     cache_key = f"remotive_{search}_{category}"
     cached = get_cached(cache_key)
     if cached is not None:
         return cached
-
+    print(cache_key)
     try:
         params: dict = {"limit": "100"}
         if search:
@@ -396,42 +296,32 @@ async def fetch_remotive_jobs(search: str = "", category: str = "") -> list:
         return []
 
 
-async def fetch_arbeitnow_jobs(page: int = 1) -> list:
-    cache_key = f"arb_p{page}"
-    cached = get_cached(cache_key)
-    if cached is not None:
-        return cached
+# ── Source test routes ────────────────────────────────────────────────
 
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            res = await client.get("https://www.arbeitnow.com/api/job-board-api", params={"page": page})
-            res.raise_for_status()
-            data = res.json()
+@router.get("/sources/jobicy")
+async def source_jobicy(
+    search: str = Query(default=""),
+    count: int = Query(default=50),
+):
+    jobs = await fetch_jobicy_jobs(search, count)
+    return {"source": "jobicy", "count": len(jobs), "jobs": jobs}
 
-        jobs = []
-        for j in data.get("data", []):
-            created = j.get("created_at")
-            posted = (
-                datetime.fromtimestamp(created, tz=timezone.utc).isoformat()
-                if created else None
-            )
-            tags = j.get("tags") or []
-            jobs.append({
-                "id": f"arb_{j.get('slug') or j.get('url') or _rand_id()}",
-                "title": j.get("title", ""),
-                "company": j.get("company_name", ""),
-                "department": ", ".join(tags),
-                "category": categorize_role(j.get("title", ""), " ".join(tags)),
-                "location": j.get("location") or ("Remote" if j.get("remote") else ""),
-                "applyUrl": j.get("url", ""),
-                "postedDate": posted,
-                "source": "arbeitnow",
-                "sourceLabel": "Arbeitnow",
-            })
-        set_cache(cache_key, jobs)
-        return jobs
-    except Exception:
-        return []
+
+@router.get("/sources/greenhouse")
+async def source_greenhouse(
+    company: str = Query(description="Greenhouse board token e.g. 'stripe', 'figma'"),
+):
+    jobs = await fetch_greenhouse_jobs(company)
+    return {"source": "greenhouse", "company": company, "count": len(jobs), "jobs": jobs}
+
+
+@router.get("/sources/remotive")
+async def source_remotive(
+    search: str = Query(default=""),
+    category: str = Query(default="", description="Engineering, Design, Product, Marketing, Sales, Data, Support, Operations"),
+):
+    jobs = await fetch_remotive_jobs(search, category)
+    return {"source": "remotive", "count": len(jobs), "jobs": jobs}
 
 
 # ── Routes ─────────────────────────────────────────────────────────────
@@ -445,8 +335,7 @@ async def jobs_feed(
     country: str = Query(default="in", description="'in'=India (default), 'us'/'gb'/etc, 'global'"),
     is_remote: bool = Query(default=False),
     job_type: Optional[str] = Query(default=None),
-    experience: Optional[int] = Query(default=None, description="Years of experience (0=fresher, 1-2=junior, 3-5=mid, 6-9=senior, 10+=lead)"),
-    sources: str = Query(default="", description="Opt-in legacy sources: greenhouse,lever,remotive,arbeitnow"),
+    experience: Optional[int] = Query(default=None),
 ):
     search_q = search.lower().strip()
     # experience is accepted but not applied to JobSpy — reserved for other platforms
@@ -455,9 +344,10 @@ async def jobs_feed(
     country_indeed = "India" if is_india else "USA"
     platforms = INDIA_PLATFORMS if is_india else GLOBAL_PLATFORMS
 
+    per_page = 10
+
     tasks = []
 
-    # JobSpy per platform — 3h query-based cache, falls back to live scrape on miss
     for platform in platforms:
         tasks.append(fetch_jobspy_platform(
             platform,
@@ -468,29 +358,14 @@ async def jobs_feed(
             job_type=job_type,
         ))
 
-    # Live API sources — always called fresh (fast REST, 15-min cache)
-    tasks.append(fetch_adzuna_jobs(search_q, location, "in" if is_india else country))
     tasks.append(fetch_jobicy_jobs(search_q))
-
-    # Optional legacy board sources (explicit opt-in via ?sources=greenhouse,lever,...)
-    extra = [s.strip().lower() for s in sources.split(",") if s.strip()]
-    if "greenhouse" in extra:
-        for co in GREENHOUSE_COMPANIES[:15] + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"]:
-            tasks.append(fetch_greenhouse_jobs(co))
-    if "lever" in extra:
-        for co in LEVER_COMPANIES + [c["handle"] for c in custom_companies if c["platform"] == "lever"]:
-            tasks.append(fetch_lever_jobs(co))
-    if "remotive" in extra:
-        tasks.append(fetch_remotive_jobs(search_q, category))
-    if "arbeitnow" in extra:
-        tasks.append(fetch_arbeitnow_jobs(page))
+    tasks.append(fetch_remotive_jobs(search_q, category))
+    for co in GREENHOUSE_COMPANIES[:15] + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"]:
+        tasks.append(fetch_greenhouse_jobs(co))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    all_jobs: list = []
-    for r in results:
-        if isinstance(r, list):
-            all_jobs.extend(r)
+    all_jobs: list = [j for r in results if isinstance(r, list) for j in r]
 
     if search_q:
         all_jobs = [
@@ -506,7 +381,6 @@ async def jobs_feed(
 
     all_jobs.sort(key=lambda j: _parse_date(j["postedDate"]), reverse=True)
 
-    per_page = 50
     start = (page - 1) * per_page
 
     return {
@@ -550,7 +424,6 @@ def cache_status():
 def get_companies():
     return {
         "greenhouse": GREENHOUSE_COMPANIES + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"],
-        "lever": LEVER_COMPANIES + [c["handle"] for c in custom_companies if c["platform"] == "lever"],
     }
 
 
@@ -561,10 +434,10 @@ class AddCompanyRequest(BaseModel):
 
 @router.post("/companies")
 def add_company(body: AddCompanyRequest):
-    if body.platform not in ("greenhouse", "lever"):
+    if body.platform != "greenhouse":
         return JSONResponse(
             status_code=400,
-            content={"error": "handle and platform (greenhouse|lever) are required"},
+            content={"error": "platform must be 'greenhouse'"},
         )
     exists = any(c["handle"] == body.handle and c["platform"] == body.platform for c in custom_companies)
     if not exists:

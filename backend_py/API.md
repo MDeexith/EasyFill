@@ -273,7 +273,6 @@ Returns aggregated job listings from multiple sources. JobSpy results (Indeed, L
 | `country` | `string` | `"in"` | `"in"` = India (default), `"us"`, `"gb"`, `"au"`, `"global"` |
 | `is_remote` | `boolean` | `false` | Filter for remote jobs only |
 | `job_type` | `string` | `null` | `fulltime`, `parttime`, `internship`, `contract` |
-| `sources` | `string` | `""` | Opt-in legacy sources (comma-separated): `greenhouse`, `lever`, `remotive`, `arbeitnow` |
 
 **Sample requests:**
 ```
@@ -282,7 +281,7 @@ GET /jobs/feed?search=android+developer&location=Bangalore
 GET /jobs/feed?category=Engineering&country=in&page=2
 GET /jobs/feed?search=frontend&is_remote=true&job_type=fulltime
 GET /jobs/feed?country=us&search=data+scientist&location=New+York
-GET /jobs/feed?sources=greenhouse,lever&search=backend
+GET /jobs/feed?search=backend
 ```
 
 **Response:**
@@ -292,14 +291,14 @@ GET /jobs/feed?sources=greenhouse,lever&search=backend
 | `jobs` | `array` | Paginated list of job objects (max 50) |
 | `total` | `integer` | Total matched jobs across all sources |
 | `page` | `integer` | Current page |
-| `perPage` | `integer` | Items per page (always 50) |
+| `perPage` | `integer` | Items per page (always 10) |
 | `hasMore` | `boolean` | Whether more pages exist |
 
 **Job object:**
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | `string` | Unique job ID (prefixed by source: `spy_`, `adzuna_`, `jobicy_`, `gh_`, etc.) |
+| `id` | `string` | Unique job ID (prefixed by source: `spy_`, `jobicy_`, `gh_`, etc.) |
 | `title` | `string` | Job title |
 | `company` | `string` | Company name |
 | `department` | `string` | Department or function |
@@ -307,7 +306,7 @@ GET /jobs/feed?sources=greenhouse,lever&search=backend
 | `location` | `string` | City, state, country or `"Remote"` |
 | `applyUrl` | `string` | Direct link to apply |
 | `postedDate` | `string\|null` | ISO 8601 date string or null |
-| `source` | `string` | Source platform: `indeed`, `linkedin`, `naukri`, `google`, `adzuna`, `jobicy`, etc. |
+| `source` | `string` | Source platform: `indeed`, `linkedin`, `naukri`, `google`, `jobicy`, etc. |
 | `sourceLabel` | `string` | Human-readable source name |
 | `isRemote` | `boolean` | Remote flag (JobSpy sources only) |
 | `jobType` | `string` | `fulltime`, `parttime`, `internship`, `contract` (JobSpy sources only) |
@@ -335,22 +334,10 @@ GET /jobs/feed?sources=greenhouse,lever&search=backend
       "currency": "INR",
       "description": "We are looking for a Senior Android Developer..."
     },
-    {
-      "id": "adzuna_in_98765432",
-      "title": "Android Engineer",
-      "company": "Zepto",
-      "department": "IT Jobs",
-      "category": "Engineering",
-      "location": "Mumbai, Maharashtra",
-      "applyUrl": "https://www.adzuna.in/jobs/details/98765432",
-      "postedDate": "2026-05-01T10:30:00Z",
-      "source": "adzuna",
-      "sourceLabel": "Adzuna India"
-    }
   ],
   "total": 143,
   "page": 1,
-  "perPage": 50,
+  "perPage": 10,
   "hasMore": true
 }
 ```
@@ -385,11 +372,6 @@ Shows all currently cached job sources, how many jobs are stored, how old the ca
       "age_minutes": 14.5,
       "expires_in_minutes": 165.5
     },
-    "adzuna_in__": {
-      "count": 47,
-      "age_minutes": 2.1,
-      "expires_in_minutes": 12.9
-    }
   }
 }
 ```
@@ -419,15 +401,14 @@ Clears all JobSpy cache entries. The next `/jobs/feed` request will re-scrape li
 
 ### `GET /jobs/companies`
 
-Returns the full list of companies tracked on Greenhouse and Lever boards.
+Returns the full list of companies tracked on the Greenhouse board.
 
 **Request params:** none
 
 **Sample response:**
 ```json
 {
-  "greenhouse": ["figma", "stripe", "notion", "cloudflare", "..."],
-  "lever": ["netflix", "twitch", "anthropic", "..."]
+  "greenhouse": ["figma", "stripe", "notion", "cloudflare", "..."]
 }
 ```
 
@@ -437,7 +418,7 @@ Returns the full list of companies tracked on Greenhouse and Lever boards.
 
 ### `POST /jobs/companies`
 
-Add a custom company to track on Greenhouse or Lever. Persists in memory until server restart.
+Add a custom company to track on Greenhouse. Persists in memory until server restart.
 
 **Headers:**
 ```
@@ -449,7 +430,7 @@ Content-Type: application/json
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `handle` | `string` | ✅ | Company board handle/slug |
-| `platform` | `string` | ✅ | `"greenhouse"` or `"lever"` |
+| `platform` | `string` | ✅ | `"greenhouse"` |
 
 **Sample request:**
 ```json
@@ -466,7 +447,7 @@ Content-Type: application/json
 
 **Error response:**
 ```json
-{ "error": "handle and platform (greenhouse|lever) are required" }
+{ "error": "platform must be 'greenhouse'" }
 ```
 
 ---
@@ -476,12 +457,61 @@ Content-Type: application/json
 | Source | TTL | Notes |
 |---|---|---|
 | JobSpy (Indeed, LinkedIn, Naukri, Google, Glassdoor) | **3 hours** | Query-based — populated on first request |
-| Adzuna | **15 minutes** | Fast REST API |
 | Jobicy | **15 minutes** | Fast REST API |
 | Greenhouse | **15 minutes** | Per company board |
-| Lever | **15 minutes** | Per company handle |
+
 | Remotive | **15 minutes** | Per search+category combo |
-| Arbeitnow | **15 minutes** | Per page number |
+
+---
+
+## 10. Source Test Routes
+
+Individual routes to test each non-JobSpy job source in isolation. Each returns the raw job list from that source plus a count.
+
+### `GET /jobs/sources/jobicy`
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `search` | `string` | `""` | Tag/keyword filter |
+| `count` | `integer` | `50` | Number of results |
+
+```
+GET /jobs/sources/jobicy?search=python&count=20
+```
+
+---
+
+### `GET /jobs/sources/greenhouse`
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `company` | `string` | ✅ | Greenhouse board token e.g. `stripe`, `figma` |
+
+```
+GET /jobs/sources/greenhouse?company=stripe
+```
+
+---
+
+### `GET /jobs/sources/remotive`
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `search` | `string` | `""` | Keyword search |
+| `category` | `string` | `""` | `Engineering`, `Design`, `Product`, `Marketing`, `Sales`, `Data`, `Support`, `Operations` |
+
+```
+GET /jobs/sources/remotive?category=Engineering&search=backend
+```
+
+**All source routes return:**
+```json
+{
+  "source": "jobicy",
+  "count": 42,
+  "jobs": [ ... ]
+}
+```
 
 ---
 
@@ -490,6 +520,5 @@ Content-Type: application/json
 | Variable | Required | Description |
 |---|---|---|
 | `OPENROUTER_API_KEY` | ✅ | OpenRouter API key for LLM endpoints |
-| `ADZUNA_APP_ID` | ❌ | Adzuna app ID (free at developer.adzuna.com) |
-| `ADZUNA_APP_KEY` | ❌ | Adzuna app key |
+
 | `PORT` | ❌ | Server port (default: `3001`) |
