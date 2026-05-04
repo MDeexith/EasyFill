@@ -256,7 +256,7 @@ async def fetch_remotive_jobs(search: str = "", category: str = "") -> list:
     cached = get_cached(cache_key)
     if cached is not None:
         return cached
-
+    print(cache_key)
     try:
         params: dict = {"limit": "100"}
         if search:
@@ -296,44 +296,6 @@ async def fetch_remotive_jobs(search: str = "", category: str = "") -> list:
         return []
 
 
-async def fetch_arbeitnow_jobs(page: int = 1) -> list:
-    cache_key = f"arb_p{page}"
-    cached = get_cached(cache_key)
-    if cached is not None:
-        return cached
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            res = await client.get("https://www.arbeitnow.com/api/job-board-api", params={"page": page})
-            res.raise_for_status()
-            data = res.json()
-
-        jobs = []
-        for j in data.get("data", []):
-            created = j.get("created_at")
-            posted = (
-                datetime.fromtimestamp(created, tz=timezone.utc).isoformat()
-                if created else None
-            )
-            tags = j.get("tags") or []
-            jobs.append({
-                "id": f"arb_{j.get('slug') or j.get('url') or _rand_id()}",
-                "title": j.get("title", ""),
-                "company": j.get("company_name", ""),
-                "department": ", ".join(tags),
-                "category": categorize_role(j.get("title", ""), " ".join(tags)),
-                "location": j.get("location") or ("Remote" if j.get("remote") else ""),
-                "applyUrl": j.get("url", ""),
-                "postedDate": posted,
-                "source": "arbeitnow",
-                "sourceLabel": "Arbeitnow",
-            })
-        set_cache(cache_key, jobs)
-        return jobs
-    except Exception:
-        return []
-
-
 # ── Source test routes ────────────────────────────────────────────────
 
 @router.get("/sources/jobicy")
@@ -362,14 +324,6 @@ async def source_remotive(
     return {"source": "remotive", "count": len(jobs), "jobs": jobs}
 
 
-@router.get("/sources/arbeitnow")
-async def source_arbeitnow(
-    page: int = Query(default=1),
-):
-    jobs = await fetch_arbeitnow_jobs(page)
-    return {"source": "arbeitnow", "count": len(jobs), "jobs": jobs}
-
-
 # ── Routes ─────────────────────────────────────────────────────────────
 
 @router.get("/feed")
@@ -382,7 +336,7 @@ async def jobs_feed(
     is_remote: bool = Query(default=False),
     job_type: Optional[str] = Query(default=None),
     experience: Optional[int] = Query(default=None, description="Years of experience (0=fresher, 1-2=junior, 3-5=mid, 6-9=senior, 10+=lead)"),
-    sources: str = Query(default="", description="Opt-in legacy sources: greenhouse,remotive,arbeitnow"),
+    sources: str = Query(default="", description="Opt-in legacy sources: greenhouse,remotive"),
 ):
     search_q = search.lower().strip()
     # experience is accepted but not applied to JobSpy — reserved for other platforms
@@ -407,15 +361,13 @@ async def jobs_feed(
     # Live API sources — always called fresh (fast REST, 15-min cache)
     tasks.append(fetch_jobicy_jobs(search_q))
 
-    # Optional legacy board sources (explicit opt-in via ?sources=greenhouse,remotive,...)
+    # Optional legacy board sources (explicit opt-in via ?sources=greenhouse,remotive)
     extra = [s.strip().lower() for s in sources.split(",") if s.strip()]
     if "greenhouse" in extra:
         for co in GREENHOUSE_COMPANIES[:15] + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"]:
             tasks.append(fetch_greenhouse_jobs(co))
     if "remotive" in extra:
         tasks.append(fetch_remotive_jobs(search_q, category))
-    if "arbeitnow" in extra:
-        tasks.append(fetch_arbeitnow_jobs(page))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 

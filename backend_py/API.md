@@ -273,7 +273,7 @@ Returns aggregated job listings from multiple sources. JobSpy results (Indeed, L
 | `country` | `string` | `"in"` | `"in"` = India (default), `"us"`, `"gb"`, `"au"`, `"global"` |
 | `is_remote` | `boolean` | `false` | Filter for remote jobs only |
 | `job_type` | `string` | `null` | `fulltime`, `parttime`, `internship`, `contract` |
-| `sources` | `string` | `""` | Opt-in legacy sources (comma-separated): `greenhouse`, `remotive`, `arbeitnow` |
+| `sources` | `string` | `""` | Opt-in legacy sources (comma-separated): `greenhouse`, `remotive` |
 
 **Sample requests:**
 ```
@@ -462,7 +462,6 @@ Content-Type: application/json
 | Greenhouse | **15 minutes** | Per company board |
 
 | Remotive | **15 minutes** | Per search+category combo |
-| Arbeitnow | **15 minutes** | Per page number |
 
 ---
 
@@ -504,18 +503,6 @@ GET /jobs/sources/greenhouse?company=stripe
 
 ```
 GET /jobs/sources/remotive?category=Engineering&search=backend
-```
-
----
-
-### `GET /jobs/sources/arbeitnow`
-
-| Param | Type | Default | Description |
-|---|---|---|---|
-| `page` | `integer` | `1` | Page number |
-
-```
-GET /jobs/sources/arbeitnow?page=1
 ```
 
 **All source routes return:**
