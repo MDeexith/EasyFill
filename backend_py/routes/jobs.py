@@ -346,18 +346,24 @@ async def jobs_feed(
 
     tasks = []
 
-    # JobSpy per platform — 3h query-based cache, falls back to live scrape on miss
+    # JobSpy — only await if already cached; otherwise fire in background so the
+    # first response comes back fast from the live APIs. Cache warms within ~15s
+    # and subsequent requests will include JobSpy results.
+    spy_kwargs = dict(
+        search=search_q,
+        location=india_location,
+        country_indeed=country_indeed,
+        is_remote=is_remote,
+        job_type=job_type,
+    )
     for platform in platforms:
-        tasks.append(fetch_jobspy_platform(
-            platform,
-            search=search_q,
-            location=india_location,
-            country_indeed=country_indeed,
-            is_remote=is_remote,
-            job_type=job_type,
-        ))
+        cache_key = f"spy_{platform}_{search_q}_{india_location}".lower().replace(" ", "_")
+        if get_cached(cache_key, SPY_CACHE_TTL) is not None:
+            tasks.append(fetch_jobspy_platform(platform, **spy_kwargs))
+        else:
+            asyncio.create_task(fetch_jobspy_platform(platform, **spy_kwargs))
 
-    # Always-on sources
+    # Always-on fast sources (15-min cache, sub-second on hit)
     tasks.append(fetch_jobicy_jobs(search_q))
     tasks.append(fetch_remotive_jobs(search_q, category))
     for co in GREENHOUSE_COMPANIES[:15] + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"]:
