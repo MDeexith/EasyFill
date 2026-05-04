@@ -24,12 +24,6 @@ GREENHOUSE_COMPANIES = [
     'webflow', 'doordash', 'brex', 'dbt-labs', 'anduril',
 ]
 
-LEVER_COMPANIES = [
-    'netflix', 'twitch', 'lever', 'postman', 'netlify',
-    'samsara', 'verkada', 'anthropic', 'wiz-inc', 'lucidmotors',
-    'navan', 'podium', 'earnin', 'hightouch', 'weights-and-biases',
-]
-
 custom_companies: list[dict] = []
 
 # ── JobSpy platforms ───────────────────────────────────────────────────
@@ -257,50 +251,6 @@ async def fetch_greenhouse_jobs(board_token: str) -> list:
         return []
 
 
-async def fetch_lever_jobs(company_handle: str) -> list:
-    cache_key = f"lv_{company_handle}"
-    cached = get_cached(cache_key)
-    if cached is not None:
-        return cached
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            res = await client.get(f"https://api.lever.co/v0/postings/{company_handle}?mode=json")
-            res.raise_for_status()
-            postings = res.json()
-
-        if not isinstance(postings, list):
-            postings = []
-
-        jobs = []
-        for p in postings:
-            cats = p.get("categories") or {}
-            dept = cats.get("team") or cats.get("department") or ""
-            loc = cats.get("location", "")
-            commitment = cats.get("commitment", "")
-            created_at = p.get("createdAt")
-            posted = (
-                datetime.fromtimestamp(created_at / 1000, tz=timezone.utc).isoformat()
-                if created_at else None
-            )
-            jobs.append({
-                "id": f"lv_{company_handle}_{p['id']}",
-                "title": p.get("text", ""),
-                "company": p.get("company", company_handle),
-                "department": dept,
-                "category": categorize_role(p.get("text", ""), dept),
-                "location": f"{loc} · {commitment}" if commitment else loc,
-                "applyUrl": p.get("hostedUrl") or p.get("applyUrl") or "",
-                "postedDate": posted,
-                "source": "lever",
-                "sourceLabel": "Lever",
-            })
-        set_cache(cache_key, jobs)
-        return jobs
-    except Exception:
-        return []
-
-
 async def fetch_remotive_jobs(search: str = "", category: str = "") -> list:
     cache_key = f"remotive_{search}_{category}"
     cached = get_cached(cache_key)
@@ -403,14 +353,6 @@ async def source_greenhouse(
     return {"source": "greenhouse", "company": company, "count": len(jobs), "jobs": jobs}
 
 
-@router.get("/sources/lever")
-async def source_lever(
-    company: str = Query(description="Lever company handle e.g. 'anthropic', 'netflix'"),
-):
-    jobs = await fetch_lever_jobs(company)
-    return {"source": "lever", "company": company, "count": len(jobs), "jobs": jobs}
-
-
 @router.get("/sources/remotive")
 async def source_remotive(
     search: str = Query(default=""),
@@ -440,7 +382,7 @@ async def jobs_feed(
     is_remote: bool = Query(default=False),
     job_type: Optional[str] = Query(default=None),
     experience: Optional[int] = Query(default=None, description="Years of experience (0=fresher, 1-2=junior, 3-5=mid, 6-9=senior, 10+=lead)"),
-    sources: str = Query(default="", description="Opt-in legacy sources: greenhouse,lever,remotive,arbeitnow"),
+    sources: str = Query(default="", description="Opt-in legacy sources: greenhouse,remotive,arbeitnow"),
 ):
     search_q = search.lower().strip()
     # experience is accepted but not applied to JobSpy — reserved for other platforms
@@ -465,14 +407,11 @@ async def jobs_feed(
     # Live API sources — always called fresh (fast REST, 15-min cache)
     tasks.append(fetch_jobicy_jobs(search_q))
 
-    # Optional legacy board sources (explicit opt-in via ?sources=greenhouse,lever,...)
+    # Optional legacy board sources (explicit opt-in via ?sources=greenhouse,remotive,...)
     extra = [s.strip().lower() for s in sources.split(",") if s.strip()]
     if "greenhouse" in extra:
         for co in GREENHOUSE_COMPANIES[:15] + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"]:
             tasks.append(fetch_greenhouse_jobs(co))
-    if "lever" in extra:
-        for co in LEVER_COMPANIES + [c["handle"] for c in custom_companies if c["platform"] == "lever"]:
-            tasks.append(fetch_lever_jobs(co))
     if "remotive" in extra:
         tasks.append(fetch_remotive_jobs(search_q, category))
     if "arbeitnow" in extra:
@@ -543,7 +482,6 @@ def cache_status():
 def get_companies():
     return {
         "greenhouse": GREENHOUSE_COMPANIES + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"],
-        "lever": LEVER_COMPANIES + [c["handle"] for c in custom_companies if c["platform"] == "lever"],
     }
 
 
@@ -554,10 +492,10 @@ class AddCompanyRequest(BaseModel):
 
 @router.post("/companies")
 def add_company(body: AddCompanyRequest):
-    if body.platform not in ("greenhouse", "lever"):
+    if body.platform != "greenhouse":
         return JSONResponse(
             status_code=400,
-            content={"error": "handle and platform (greenhouse|lever) are required"},
+            content={"error": "platform must be 'greenhouse'"},
         )
     exists = any(c["handle"] == body.handle and c["platform"] == body.platform for c in custom_companies)
     if not exists:

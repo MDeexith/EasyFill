@@ -273,7 +273,7 @@ Returns aggregated job listings from multiple sources. JobSpy results (Indeed, L
 | `country` | `string` | `"in"` | `"in"` = India (default), `"us"`, `"gb"`, `"au"`, `"global"` |
 | `is_remote` | `boolean` | `false` | Filter for remote jobs only |
 | `job_type` | `string` | `null` | `fulltime`, `parttime`, `internship`, `contract` |
-| `sources` | `string` | `""` | Opt-in legacy sources (comma-separated): `greenhouse`, `lever`, `remotive`, `arbeitnow` |
+| `sources` | `string` | `""` | Opt-in legacy sources (comma-separated): `greenhouse`, `remotive`, `arbeitnow` |
 
 **Sample requests:**
 ```
@@ -282,7 +282,7 @@ GET /jobs/feed?search=android+developer&location=Bangalore
 GET /jobs/feed?category=Engineering&country=in&page=2
 GET /jobs/feed?search=frontend&is_remote=true&job_type=fulltime
 GET /jobs/feed?country=us&search=data+scientist&location=New+York
-GET /jobs/feed?sources=greenhouse,lever&search=backend
+GET /jobs/feed?sources=greenhouse&search=backend
 ```
 
 **Response:**
@@ -402,15 +402,14 @@ Clears all JobSpy cache entries. The next `/jobs/feed` request will re-scrape li
 
 ### `GET /jobs/companies`
 
-Returns the full list of companies tracked on Greenhouse and Lever boards.
+Returns the full list of companies tracked on the Greenhouse board.
 
 **Request params:** none
 
 **Sample response:**
 ```json
 {
-  "greenhouse": ["figma", "stripe", "notion", "cloudflare", "..."],
-  "lever": ["netflix", "twitch", "anthropic", "..."]
+  "greenhouse": ["figma", "stripe", "notion", "cloudflare", "..."]
 }
 ```
 
@@ -420,7 +419,7 @@ Returns the full list of companies tracked on Greenhouse and Lever boards.
 
 ### `POST /jobs/companies`
 
-Add a custom company to track on Greenhouse or Lever. Persists in memory until server restart.
+Add a custom company to track on Greenhouse. Persists in memory until server restart.
 
 **Headers:**
 ```
@@ -432,7 +431,7 @@ Content-Type: application/json
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `handle` | `string` | ✅ | Company board handle/slug |
-| `platform` | `string` | ✅ | `"greenhouse"` or `"lever"` |
+| `platform` | `string` | ✅ | `"greenhouse"` |
 
 **Sample request:**
 ```json
@@ -449,7 +448,7 @@ Content-Type: application/json
 
 **Error response:**
 ```json
-{ "error": "handle and platform (greenhouse|lever) are required" }
+{ "error": "platform must be 'greenhouse'" }
 ```
 
 ---
@@ -461,7 +460,7 @@ Content-Type: application/json
 | JobSpy (Indeed, LinkedIn, Naukri, Google, Glassdoor) | **3 hours** | Query-based — populated on first request |
 | Jobicy | **15 minutes** | Fast REST API |
 | Greenhouse | **15 minutes** | Per company board |
-| Lever | **15 minutes** | Per company handle |
+
 | Remotive | **15 minutes** | Per search+category combo |
 | Arbeitnow | **15 minutes** | Per page number |
 
@@ -492,18 +491,6 @@ GET /jobs/sources/jobicy?search=python&count=20
 
 ```
 GET /jobs/sources/greenhouse?company=stripe
-```
-
----
-
-### `GET /jobs/sources/lever`
-
-| Param | Type | Required | Description |
-|---|---|---|---|
-| `company` | `string` | ✅ | Lever company handle e.g. `anthropic`, `netflix` |
-
-```
-GET /jobs/sources/lever?company=anthropic
 ```
 
 ---
