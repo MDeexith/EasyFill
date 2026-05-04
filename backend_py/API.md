@@ -291,7 +291,7 @@ GET /jobs/feed?search=backend
 | `jobs` | `array` | Paginated list of job objects (max 50) |
 | `total` | `integer` | Total matched jobs across all sources |
 | `page` | `integer` | Current page |
-| `perPage` | `integer` | Items per page (always 20) |
+| `perPage` | `integer` | Items per page (always 10) |
 | `hasMore` | `boolean` | Whether more pages exist |
 
 **Job object:**
@@ -337,7 +337,7 @@ GET /jobs/feed?search=backend
   ],
   "total": 143,
   "page": 1,
-  "perPage": 20,
+  "perPage": 10,
   "hasMore": true
 }
 ```
