@@ -346,43 +346,26 @@ async def jobs_feed(
 
     per_page = 10
 
-    spy_kwargs = dict(
-        search=search_q,
-        location=india_location,
-        country_indeed=country_indeed,
-        is_remote=is_remote,
-        job_type=job_type,
-    )
+    tasks = []
 
-    # Split JobSpy platforms into cached (instant) and uncached (need scraping)
-    cached_spy_jobs: list = []
-    uncached_spy_tasks: list = []
     for platform in platforms:
-        cache_key = f"spy_{platform}_{search_q}_{india_location}".lower().replace(" ", "_")
-        cached = get_cached(cache_key, SPY_CACHE_TTL)
-        if cached is not None:
-            cached_spy_jobs.extend(cached)
-        else:
-            # Start scraping in background — result will be available for future requests
-            uncached_spy_tasks.append(
-                asyncio.create_task(fetch_jobspy_platform(platform, **spy_kwargs))
-            )
+        tasks.append(fetch_jobspy_platform(
+            platform,
+            search=search_q,
+            location=india_location,
+            country_indeed=country_indeed,
+            is_remote=is_remote,
+            job_type=job_type,
+        ))
 
-    # Await fast sources immediately
-    fast_tasks = [
-        fetch_jobicy_jobs(search_q),
-        fetch_remotive_jobs(search_q, category),
-        *[fetch_greenhouse_jobs(co) for co in GREENHOUSE_COMPANIES[:15] + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"]],
-    ]
-    fast_results = await asyncio.gather(*fast_tasks, return_exceptions=True)
+    tasks.append(fetch_jobicy_jobs(search_q))
+    tasks.append(fetch_remotive_jobs(search_q, category))
+    for co in GREENHOUSE_COMPANIES[:15] + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"]:
+        tasks.append(fetch_greenhouse_jobs(co))
 
-    all_jobs: list = [j for r in fast_results if isinstance(r, list) for j in r]
-    all_jobs.extend(cached_spy_jobs)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Not enough jobs — wait for the in-flight JobSpy tasks before responding
-    if len(all_jobs) < per_page and uncached_spy_tasks:
-        spy_results = await asyncio.gather(*uncached_spy_tasks, return_exceptions=True)
-        all_jobs.extend(j for r in spy_results if isinstance(r, list) for j in r)
+    all_jobs: list = [j for r in results if isinstance(r, list) for j in r]
 
     if search_q:
         all_jobs = [
