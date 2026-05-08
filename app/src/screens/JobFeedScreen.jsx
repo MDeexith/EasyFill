@@ -22,14 +22,14 @@ import { saveFeedJobs, loadFeedJobs, getFeedAge } from '../profile/store';
 
 const SOURCES = [
   { key: 'all', label: 'All Sources', icon: 'layers' },
-  { key: 'greenhouse', label: 'Greenhouse', icon: 'leaf', bg: '#ecfdf5', fg: '#065f46' },
-  { key: 'lever', label: 'Lever', icon: 'arrow-up-right', bg: '#eff6ff', fg: '#1e40af' },
-  { key: 'remotive', label: 'Remotive', icon: 'globe', bg: '#f0fdf4', fg: '#166534' },
-  { key: 'arbeitnow', label: 'Arbeitnow', icon: 'briefcase', bg: '#fef3c7', fg: '#92400e' },
   { key: 'linkedin', label: 'LinkedIn', icon: 'briefcase', bg: '#eff6ff', fg: '#1e40af' },
   { key: 'indeed', label: 'Indeed', icon: 'search', bg: '#fef3c7', fg: '#92400e' },
-  { key: 'zip_recruiter', label: 'ZipRecruiter', icon: 'zap', bg: '#f0fdf4', fg: '#166534' },
   { key: 'google', label: 'Google Jobs', icon: 'globe', bg: '#fdf4ff', fg: '#7e22ce' },
+  { key: 'naukri', label: 'Naukri', icon: 'zap', bg: '#fff7ed', fg: '#9a3412' },
+  { key: 'glassdoor', label: 'Glassdoor', icon: 'star', bg: '#f0fdf4', fg: '#166534' },
+  { key: 'greenhouse', label: 'Greenhouse', icon: 'leaf', bg: '#ecfdf5', fg: '#065f46' },
+  { key: 'remotive', label: 'Remotive', icon: 'globe', bg: '#f0fdf4', fg: '#166534' },
+  { key: 'jobicy', label: 'Jobicy', icon: 'globe', bg: '#fdf4ff', fg: '#7e22ce' },
 ];
 
 const CATEGORIES = [
@@ -38,14 +38,15 @@ const CATEGORIES = [
 ];
 
 const SOURCE_BADGE = {
-  greenhouse:    { bg: '#ecfdf5', fg: '#065f46', label: 'Greenhouse' },
-  lever:         { bg: '#eff6ff', fg: '#1e40af', label: 'Lever' },
-  remotive:      { bg: '#f0fdf4', fg: '#166534', label: 'Remotive' },
-  arbeitnow:     { bg: '#fef3c7', fg: '#92400e', label: 'Arbeitnow' },
   linkedin:      { bg: '#eff6ff', fg: '#1e40af', label: 'LinkedIn' },
   indeed:        { bg: '#fef3c7', fg: '#92400e', label: 'Indeed' },
-  zip_recruiter: { bg: '#f0fdf4', fg: '#166534', label: 'ZipRecruiter' },
   google:        { bg: '#fdf4ff', fg: '#7e22ce', label: 'Google Jobs' },
+  naukri:        { bg: '#fff7ed', fg: '#9a3412', label: 'Naukri' },
+  glassdoor:     { bg: '#f0fdf4', fg: '#166534', label: 'Glassdoor' },
+  zip_recruiter: { bg: '#f0fdf4', fg: '#166534', label: 'ZipRecruiter' },
+  greenhouse:    { bg: '#ecfdf5', fg: '#065f46', label: 'Greenhouse' },
+  remotive:      { bg: '#f0fdf4', fg: '#166534', label: 'Remotive' },
+  jobicy:        { bg: '#fdf4ff', fg: '#7e22ce', label: 'Jobicy' },
 };
 
 const ROLE_ICONS = {

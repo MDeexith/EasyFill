@@ -6,7 +6,7 @@ export const FORM_SCANNER_JS = `
   var AF_ATTR = 'data-af-id';
   var SKIP_ROLE_RE = /^(navigation|menu|menubar|tablist|toolbar|banner|contentinfo)$/i;
   var INPUT_SELECTOR =
-    'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=checkbox]):not([type=radio]),' +
+    'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=checkbox]):not([type=radio]):not([type=file]),' +
     'textarea, select, [contenteditable=""], [contenteditable="true"], [role="textbox"]';
 
   // Stable counter so af_<n> ids never collide
@@ -26,6 +26,8 @@ export const FORM_SCANNER_JS = `
     return false;
   }
 
+  var ATS_DOMAIN_RE = /\b(boards\.greenhouse\.io|job-boards\.greenhouse\.io|jobs\.lever\.co|app\.lever\.co|wd\d+\.myworkdayjobs\.com|apply\.workable\.com|smartrecruiters\.com|icims\.com|taleo\.net|jobvite\.com|ashbyhq\.com|recruitee\.com|bamboohr\.com)\b/i;
+
   function getDocs(rootDoc) {
     var docs = [rootDoc];
     var iframes = rootDoc.getElementsByTagName('iframe');
@@ -33,7 +35,19 @@ export const FORM_SCANNER_JS = `
       try {
         var d = iframes[i].contentDocument;
         if (d && d.body) docs.push(d);
-      } catch (e) { /* cross-origin: skip */ }
+      } catch (e) {
+        // Cross-origin: if it's a known ATS, tell React Native to navigate there directly
+        var src = iframes[i].src || iframes[i].getAttribute('src') || '';
+        if (src && ATS_DOMAIN_RE.test(src) && window.ReactNativeWebView) {
+          if (!window.__AF_ATS_REPORTED__) window.__AF_ATS_REPORTED__ = {};
+          if (!window.__AF_ATS_REPORTED__[src]) {
+            window.__AF_ATS_REPORTED__[src] = true;
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'ATS_IFRAME_DETECTED', src: src,
+            }));
+          }
+        }
+      }
     }
     return docs;
   }
@@ -61,7 +75,9 @@ export const FORM_SCANNER_JS = `
     if (el.id) {
       try {
         var doc = el.ownerDocument || document;
-        var lbl = doc.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+        var root = (el.getRootNode && el.getRootNode()) || doc;
+        var lbl = root.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+        if (!lbl && root !== doc) lbl = doc.querySelector('label[for="' + CSS.escape(el.id) + '"]');
         if (lbl && lbl.innerText) return lbl.innerText.trim().slice(0, 120);
       } catch (e) {}
     }
@@ -76,7 +92,10 @@ export const FORM_SCANNER_JS = `
     if (llby) {
       try {
         var doc2 = el.ownerDocument || document;
-        var target = doc2.getElementById(llby.split(/\\s+/)[0]);
+        var root2 = (el.getRootNode && el.getRootNode()) || doc2;
+        var firstId = llby.split(/\\s+/)[0];
+        var target = (root2.getElementById ? root2.getElementById(firstId) : null)
+                  || doc2.getElementById(firstId);
         if (target && target.innerText) return target.innerText.trim().slice(0, 120);
       } catch (e) {}
     }
@@ -187,11 +206,12 @@ export const FORM_SCANNER_JS = `
     if (fp === lastFingerprint) {
       stableScans++;
     } else {
+      var isFirstScan = lastFingerprint === '';
       lastFingerprint = fp;
       stableScans = 0;
       if (unique.length > 0 && window.ReactNativeWebView) {
         window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'FIELDS_SCANNED', fields: unique,
+          type: isFirstScan ? 'FIELDS_SCANNED' : 'FIELDS_UPDATED', fields: unique,
         }));
       }
     }
@@ -216,7 +236,7 @@ export const FORM_SCANNER_JS = `
 
   // Safety-net periodic re-scans for late-hydrating SPAs; stops once two
   // consecutive scans return the same field set.
-  var safetyDelays = [800, 1800, 3500, 6000];
+  var safetyDelays = [800, 1800, 3500, 6000, 8000];
   safetyDelays.forEach(function(ms) {
     setTimeout(function() {
       if (stableScans < 2) scanForms();
@@ -230,9 +250,9 @@ export const FORM_SCANNER_JS = `
       for (var m = 0; m < mutations.length && !trigger; m++) {
         var mut = mutations[m];
         if (mut.type === 'attributes') {
-          // Only re-scan on attribute changes for input-like elements
           var t = mut.target;
-          if (t && t.matches && t.matches(INPUT_SELECTOR)) trigger = true;
+          if (t && t.tagName === 'IFRAME' && mut.attributeName === 'src') trigger = true;
+          else if (t && t.matches && t.matches(INPUT_SELECTOR)) trigger = true;
         } else if (mut.addedNodes && mut.addedNodes.length) {
           for (var n = 0; n < mut.addedNodes.length; n++) {
             var node = mut.addedNodes[n];
@@ -255,7 +275,50 @@ export const FORM_SCANNER_JS = `
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['name', 'id', 'autocomplete', 'type', 'role', 'aria-label', 'aria-labelledby', 'placeholder', 'style', 'class', 'hidden'],
+      attributeFilter: ['name', 'id', 'autocomplete', 'type', 'role', 'aria-label', 'aria-labelledby', 'placeholder', 'style', 'class', 'hidden', 'src'],
+    });
+  } catch (e) {}
+
+  // IntersectionObserver: re-scan when previously hidden fields scroll into view.
+  // Catches multi-step ATS forms (Workday, iCIMS) that reveal sections on scroll.
+  try {
+    var visObs = new IntersectionObserver(function(entries) {
+      for (var e = 0; e < entries.length; e++) {
+        if (entries[e].isIntersecting) { scheduleScan(200); return; }
+      }
+    }, { threshold: 0.1 });
+
+    function observeAllInputs() {
+      var docs = getDocs(document);
+      for (var d = 0; d < docs.length; d++) {
+        var iels = queryAllDeep(docs[d], INPUT_SELECTOR);
+        for (var ii = 0; ii < iels.length; ii++) {
+          try { visObs.observe(iels[ii]); } catch(ve) {}
+        }
+      }
+    }
+    observeAllInputs();
+
+    var inputAddObs = new MutationObserver(function(mutations) {
+      for (var m = 0; m < mutations.length; m++) {
+        var added = mutations[m].addedNodes;
+        for (var n = 0; n < added.length; n++) {
+          var node = added[n];
+          if (!node || node.nodeType !== 1) continue;
+          if (node.matches && node.matches(INPUT_SELECTOR)) {
+            try { visObs.observe(node); } catch(ve) {}
+          }
+          if (node.querySelectorAll) {
+            var ni = node.querySelectorAll(INPUT_SELECTOR);
+            for (var k = 0; k < ni.length; k++) {
+              try { visObs.observe(ni[k]); } catch(ve) {}
+            }
+          }
+        }
+      }
+    });
+    inputAddObs.observe(document.body || document.documentElement, {
+      childList: true, subtree: true,
     });
   } catch (e) {}
 })();

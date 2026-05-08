@@ -1,5 +1,6 @@
 import { applyHeuristics, scoreField } from './heuristics';
 import { llmMatch } from './llmClient';
+import { getCachedMapping, saveMappingCacheEntry } from '../profile/store';
 
 // AI confidence required to override a regex match. Below this, AI is treated
 // as a last-resort suggestion (still applied if regex returns nothing).
@@ -92,7 +93,19 @@ function dedupe(decisions, fieldsById) {
 // Returns { mapping, decisions } where:
 //   mapping[fieldId]   = profile key (or undefined if unmapped)
 //   decisions[fieldId] = { key, confidence, source } | null
-export async function matchFieldsToProfile(fields, profile, useLlmFallback = true) {
+export async function matchFieldsToProfile(fields, profile, useLlmFallback = true, hostname = null) {
+  // Cache hit: skip regex + AI entirely for known sites
+  if (hostname) {
+    const cached = getCachedMapping(hostname, fields, profile);
+    if (cached) {
+      const decisions = {};
+      for (const [id, key] of Object.entries(cached)) {
+        decisions[id] = { key, confidence: 1.0, source: 'cache' };
+      }
+      return { mapping: { ...cached }, decisions };
+    }
+  }
+
   const { decisions: regexDecisions } = applyHeuristics(fields);
 
   let aiDecisions = {};
@@ -118,6 +131,11 @@ export async function matchFieldsToProfile(fields, profile, useLlmFallback = tru
   const mapping = {};
   for (const [id, dec] of Object.entries(decisions)) {
     if (dec && dec.key) mapping[id] = dec.key;
+  }
+
+  // Persist to cache if enough fields matched (skips single-field login boxes)
+  if (hostname && Object.keys(mapping).length >= 3) {
+    saveMappingCacheEntry(hostname, mapping, fields, profile);
   }
 
   return { mapping, decisions };

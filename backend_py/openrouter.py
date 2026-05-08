@@ -14,10 +14,13 @@ def _client() -> AsyncOpenAI:
 
 
 async def _call(model: str, messages: list) -> str:
-    response = await _client().chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0,
+    response = await asyncio.wait_for(
+        _client().chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0,
+        ),
+        timeout=30.0,
     )
     return response.choices[0].message.content.strip()
 

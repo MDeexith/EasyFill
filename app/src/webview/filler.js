@@ -68,7 +68,37 @@ function setNativeInput(el, value) {
   var setter = nativeSetter(el);
   if (setter) setter(value);
   else el.value = value;
-  el.dispatchEvent(new Event('input',  { bubbles: true }));
+
+  // Strategy A: InputEvent with inputType satisfies React 17+ createRoot event delegation.
+  var inputFired = false;
+  try {
+    el.dispatchEvent(new InputEvent('input', {
+      bubbles: true, cancelable: true,
+      inputType: 'insertText', data: value,
+    }));
+    inputFired = true;
+  } catch (e) {}
+  if (!inputFired) el.dispatchEvent(new Event('input', { bubbles: true }));
+
+  // Strategy B: React fiber direct onChange call for React 16 class components.
+  try {
+    var fk = Object.keys(el).find(function(k) {
+      return k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance');
+    });
+    if (fk) {
+      var node = el[fk];
+      while (node) {
+        var p = node.memoizedProps;
+        if (p && typeof p.onChange === 'function') {
+          p.onChange({ target: el, currentTarget: el, type: 'change', nativeEvent: { data: value } });
+          break;
+        }
+        node = node.return;
+      }
+    }
+  } catch (e) {}
+
+  // Strategy C: change event for Vue, Angular, jQuery.
   el.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
@@ -105,6 +135,93 @@ function setSelectVal(el, value) {
     return true;
   }
   return false;
+}
+
+function isPlacesLikeInput(el) {
+  if (!el || !el.getAttribute) return false;
+  if (el.getAttribute('role') !== 'combobox') return false;
+  if (el.getAttribute('aria-controls')) return false;
+  var name = (el.getAttribute('name') || '').toLowerCase();
+  var ph = (el.getAttribute('placeholder') || '').toLowerCase();
+  var al = (el.getAttribute('aria-label') || '').toLowerCase();
+  var dl = (el.getAttribute('data-label') || '').toLowerCase();
+  return /city|location|locat|where|based|address/.test(name + ' ' + ph + ' ' + al + ' ' + dl);
+}
+
+function pickBestOption(el, value, resolve) {
+  try {
+    var listbox = document.querySelector('[role="listbox"]') ||
+                  document.querySelector('.pac-container') ||
+                  document.querySelector('[class*="autocomplete"]');
+
+    function fallbackArrow() {
+      try {
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
+        setTimeout(function() {
+          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+          resolve(false);
+        }, 150);
+      } catch(e) { resolve(false); }
+    }
+
+    if (!listbox) { fallbackArrow(); return; }
+
+    var options = listbox.querySelectorAll('[role="option"], .pac-item, li');
+    if (!options || options.length === 0) { fallbackArrow(); return; }
+
+    var target = String(value).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    var best = null, bestScore = 0;
+    for (var i = 0; i < options.length; i++) {
+      var text = (options[i].innerText || options[i].textContent || '')
+                  .toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+      var score = text === target ? 3 : text.startsWith(target) ? 2 : text.indexOf(target) !== -1 ? 1 : 0;
+      if (score > bestScore) { bestScore = score; best = options[i]; }
+    }
+
+    if (best) {
+      try { best.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); } catch(e) {}
+      try { best.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch(e) {}
+      best.click();
+      resolve(true);
+    } else {
+      fallbackArrow();
+    }
+  } catch(e) { resolve(false); }
+}
+
+function tryPlacesComboboxFill(el, value) {
+  return new Promise(function(resolve) {
+    fireFocus(el);
+    var setter = nativeSetter(el);
+    if (setter) setter(''); else el.value = '';
+    try {
+      el.dispatchEvent(new InputEvent('input', {
+        bubbles: true, cancelable: true, inputType: 'deleteContentBackward',
+      }));
+    } catch(e) { el.dispatchEvent(new Event('input', { bubbles: true })); }
+
+    var typeChunk = value.slice(0, Math.min(value.length, 6));
+    var i = 0;
+
+    function typeNext() {
+      if (i >= typeChunk.length) {
+        setTimeout(function() { pickBestOption(el, value, resolve); }, 700);
+        return;
+      }
+      var partial = typeChunk.slice(0, i + 1);
+      if (setter) setter(partial); else el.value = partial;
+      try {
+        el.dispatchEvent(new InputEvent('input', {
+          bubbles: true, cancelable: true,
+          inputType: 'insertText', data: typeChunk[i],
+        }));
+      } catch(e) { el.dispatchEvent(new Event('input', { bubbles: true })); }
+      i++;
+      setTimeout(typeNext, 80);
+    }
+
+    typeNext();
+  });
 }
 
 function tryComboboxFill(el, value) {
@@ -173,6 +290,14 @@ function fillOne(el, value) {
     var ok = setSelectVal(el, strVal);
     if (ok) mark();
     return ok;
+  }
+
+  // Google Places / geocoding-backed location comboboxes need char-by-char
+  // typing + a longer wait for the API response before clicking an option.
+  if (isPlacesLikeInput(el)) {
+    tryPlacesComboboxFill(el, strVal).then(function(ok) { if (ok) mark(); });
+    mark();
+    return true;
   }
 
   // Combobox / custom dropdown — try first, fall through to native fill if it

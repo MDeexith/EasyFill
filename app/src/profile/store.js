@@ -130,3 +130,73 @@ export function isOnboarded() {
 export function setOnboarded(v) {
   storage.set(ONBOARDED_KEY, !!v);
 }
+
+// ─── Per-site mapping cache ─────────────────────────────────────────
+// Stores hostname → { version, savedAt, profileHash, mapping: { fingerprint: profileKey } }
+// Fingerprint: `${field.name}|${field.label}|${field.type}|${field.autocomplete}`
+// (stable across page loads, unlike af_N synthetic ids)
+
+const MAPPING_CACHE_KEY = 'mapping_cache';
+const MAPPING_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const MAPPING_CACHE_MAX_HOSTS = 100;
+
+function djb2Hash(str) {
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) + h) ^ str.charCodeAt(i);
+    h = h >>> 0;
+  }
+  return h.toString(16);
+}
+
+function profileHashStr(profile) {
+  const str = Object.keys(profile).sort()
+    .map(k => k + '=' + (profile[k] || ''))
+    .join('&');
+  return djb2Hash(str);
+}
+
+function fieldFingerprint(f) {
+  return [f.name || '', f.label || '', f.type || '', f.autocomplete || ''].join('|');
+}
+
+function loadMappingCacheRaw() {
+  const raw = storage.getString(MAPPING_CACHE_KEY);
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch { return {}; }
+}
+
+export function getCachedMapping(hostname, fields, profile) {
+  const cache = loadMappingCacheRaw();
+  const entry = cache[hostname];
+  if (!entry) return null;
+  if (Date.now() - entry.savedAt > MAPPING_CACHE_MAX_AGE_MS) return null;
+  if (entry.profileHash !== profileHashStr(profile)) return null;
+  const result = {};
+  for (const f of fields) {
+    const fp = fieldFingerprint(f);
+    if (entry.mapping[fp]) result[f.id] = entry.mapping[fp];
+  }
+  return Object.keys(result).length > 0 ? result : null;
+}
+
+export function saveMappingCacheEntry(hostname, mapping, fields, profile) {
+  const cache = loadMappingCacheRaw();
+  const fpById = {};
+  for (const f of fields) fpById[f.id] = fieldFingerprint(f);
+  const fpMapping = {};
+  for (const [fieldId, profileKey] of Object.entries(mapping)) {
+    if (!profileKey) continue;
+    const fp = fpById[fieldId];
+    if (fp) fpMapping[fp] = profileKey;
+  }
+  cache[hostname] = { version: 1, savedAt: Date.now(), profileHash: profileHashStr(profile), mapping: fpMapping };
+  const hosts = Object.keys(cache).sort((a, b) => cache[a].savedAt - cache[b].savedAt);
+  while (hosts.length > MAPPING_CACHE_MAX_HOSTS) delete cache[hosts.shift()];
+  storage.set(MAPPING_CACHE_KEY, JSON.stringify(cache));
+}
+
+export function clearMappingCache() {
+  storage.remove(MAPPING_CACHE_KEY);
+}
+

@@ -5,7 +5,7 @@ import { Eyebrow } from '../components/ui';
 import AppDialog, { useDialog } from '../components/AppDialog';
 import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
-import { clearProfile, saveHistory, setOnboarded, clearFeedJobs } from '../profile/store';
+import { clearProfile, saveHistory, setOnboarded, clearFeedJobs, clearMappingCache } from '../profile/store';
 
 export default function SettingsScreen({ navigation }) {
   const { show, dialogProps } = useDialog();
@@ -23,6 +23,7 @@ export default function SettingsScreen({ navigation }) {
             clearProfile();
             saveHistory([]);
             clearFeedJobs();
+            clearMappingCache();
             setOnboarded(false);
             const root = navigation.getParent()?.getParent() || navigation.getParent();
             root?.reset({ index: 0, routes: [{ name: 'Splash' }] });
@@ -125,7 +126,9 @@ export default function SettingsScreen({ navigation }) {
                     </Text>
                     <Text style={styles.rowSub} numberOfLines={1}>{it.sub}</Text>
                   </View>
-                  <Icon name="chevron-right" size={16} color={theme.colors.muted} />
+                  {it.trailing
+                    ? it.trailing
+                    : <Icon name="chevron-right" size={16} color={theme.colors.muted} />}
                 </TouchableOpacity>
               ))}
             </View>

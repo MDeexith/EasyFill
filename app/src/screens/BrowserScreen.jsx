@@ -29,16 +29,16 @@ function getHostname(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
 }
 
-const WEBVIEW_USER_AGENT = Platform.select({
-  ios:
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) ' +
-    'AppleWebKit/605.1.15 (KHTML, like Gecko) ' +
-    'CriOS/124.0.6367.82 Mobile/15E148 Safari/604.1',
-  android:
-    'Mozilla/5.0 (Linux; Android 14; Pixel 8) ' +
-    'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-    'Chrome/124.0.6367.82 Mobile Safari/537.36',
-});
+// Force all shadow roots open before page scripts run so our scanner can traverse them.
+// Workday Canvas uses closed shadow DOM by default — this override makes fields visible.
+const SHADOW_DOM_OPENER = `(function(){try{var o=Element.prototype.attachShadow;Element.prototype.attachShadow=function(i){return o.call(this,{mode:'open'});};}catch(e){}})();true;`;
+
+// Desktop UA: job application forms (Greenhouse, Workday, Lever) render full
+// field sets only on desktop. Mobile UA triggers stripped views or app-store redirects.
+const WEBVIEW_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
+  'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+  'Chrome/124.0.0.0 Safari/537.36';
 
 
 export default function BrowserScreen({ route, navigation }) {
@@ -58,6 +58,7 @@ export default function BrowserScreen({ route, navigation }) {
 
   const urlRef = useRef(url);
   const titleRef = useRef('');
+  const lastAtsSrcRef = useRef('');
 
   const { width: screenW, height: screenH } = useWindowDimensions();
   const FAB_W = 180;
@@ -111,6 +112,23 @@ export default function BrowserScreen({ route, navigation }) {
       friction: 8,
     }).start();
   }, [phase, fabAnim]);
+
+  // Safety net: if loading spinner is stuck (onLoadEnd never fired), clear it after 5s.
+  useEffect(() => {
+    if (!loading) return;
+    const timer = setTimeout(() => setLoading(false), 5000);
+    return () => clearTimeout(timer);
+  }, [loading]);
+
+  // Safety net: if filling/drafting hangs (backend timeout, network error),
+  // revert to detected after 25s so user can retry.
+  useEffect(() => {
+    if (phase !== 'filling' && phase !== 'drafting') return;
+    const timer = setTimeout(() => {
+      setPhase(prev => (prev === 'filling' || prev === 'drafting') ? 'detected' : prev);
+    }, 25000);
+    return () => clearTimeout(timer);
+  }, [phase]);
 
   // After page load, if no FIELDS_SCANNED message ever arrives, fall into a
   // 'no-fields' state so the user gets a manual "Scan again" affordance
@@ -252,14 +270,14 @@ export default function BrowserScreen({ route, navigation }) {
     try {
       const profile = enrichProfile(loadProfile());
 
-      const { mapping, decisions } = await matchFieldsToProfile(scanned, profile, true);
+      const { mapping, decisions } = await matchFieldsToProfile(scanned, profile, true, getHostname(urlRef.current));
 
       let autoMatched = 0;
       let aiMatched = 0;
       let regexMatched = 0;
       for (const dec of Object.values(decisions || {})) {
         if (!dec || !dec.key) continue;
-        if (dec.source === 'autocomplete' || dec.source === 'type') autoMatched++;
+        if (dec.source === 'autocomplete' || dec.source === 'type' || dec.source === 'cache') autoMatched++;
         else if (dec.source === 'ai' || dec.source === 'ai-low') aiMatched++;
         else regexMatched++;
       }
@@ -330,7 +348,42 @@ export default function BrowserScreen({ route, navigation }) {
         const scanned = data.fields || [];
         setFields(scanned);
         if (scanned.length > 0) {
-          setPhase(prev => prev === 'loading' ? 'detected' : prev);
+          setPhase(prev => (prev === 'loading' || prev === 'no-fields') ? 'detected' : prev);
+        }
+      }
+
+      if (data.type === 'ATS_IFRAME_DETECTED') {
+        let atsSrc = data.src;
+        if (atsSrc) {
+          try {
+            const u = new URL(atsSrc);
+            if (/greenhouse\.io$/i.test(u.hostname) && u.pathname.includes('/embed/job_app')) {
+              const company = u.searchParams.get('for');
+              const token = u.searchParams.get('token');
+              if (company && token) {
+                atsSrc = `https://${u.hostname}/${company}/jobs/${token}`;
+              }
+            }
+          } catch (e) {}
+          // Guard against redirect loops: only navigate if target has changed
+          if (lastAtsSrcRef.current !== atsSrc) {
+            lastAtsSrcRef.current = atsSrc;
+            webViewRef.current?.injectJavaScript(
+              `window.location.href = ${JSON.stringify(atsSrc)}; true;`
+            );
+          }
+        }
+      }
+
+      if (data.type === 'FIELDS_UPDATED') {
+        const newFields = data.fields || [];
+        setFields(prev => {
+          const existing = new Set(prev.map(f => f.id));
+          const added = newFields.filter(f => !existing.has(f.id));
+          return added.length > 0 ? [...prev, ...added] : prev;
+        });
+        if (newFields.length > 0) {
+          setPhase(prev => (prev === 'loading' || prev === 'no-fields') ? 'detected' : prev);
         }
       }
 
@@ -399,6 +452,7 @@ export default function BrowserScreen({ route, navigation }) {
           ref={webViewRef}
           source={{ uri: url }}
           style={{ flex: 1, backgroundColor: '#fff' }}
+          injectedJavaScriptBeforeContentLoaded={SHADOW_DOM_OPENER}
           onLoadStart={() => { setLoading(true); setPhase('loading'); setFields([]); setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 }); }}
           onLoadEnd={() => {
             setLoading(false);
@@ -417,16 +471,27 @@ export default function BrowserScreen({ route, navigation }) {
               setPhase('loading');
               setFields([]);
               setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+              // Reset ATS loop guard when hostname changes so a new job page on the
+              // same company's ATS gets a fresh transform attempt.
+              try {
+                const prevHost = new URL(urlRef.current).hostname;
+                const nextHost = new URL(state.url).hostname;
+                if (prevHost !== nextHost) lastAtsSrcRef.current = '';
+              } catch {}
+              // Clear scanner guard + ATS report cache so detection re-fires on new page.
+              webViewRef.current?.injectJavaScript(
+                'window.__AF_SCANNER_INSTALLED__ = false; window.__AF_ATS_REPORTED__ = {}; true;'
+              );
               setTimeout(() => {
                 webViewRef.current?.injectJavaScript(FORM_SCANNER_JS + '; true;');
-              }, 600);
+              }, 1000);
             }
           }}
           onMessage={onMessage}
           onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
           onOpenWindow={onOpenWindow}
           userAgent={WEBVIEW_USER_AGENT}
-          sharedCookiesEnabled={Platform.OS === 'ios'}
+          sharedCookiesEnabled
           javaScriptEnabled
           domStorageEnabled
           thirdPartyCookiesEnabled

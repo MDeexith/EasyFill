@@ -336,9 +336,14 @@ async def jobs_feed(
     is_remote: bool = Query(default=False),
     job_type: Optional[str] = Query(default=None),
     experience: Optional[int] = Query(default=None),
+    sources: str = Query(default="", description="Comma-separated list of sources to include, e.g. 'linkedin,indeed'. Empty = all."),
 ):
     search_q = search.lower().strip()
-    # experience is accepted but not applied to JobSpy — reserved for other platforms
+    enabled = {s.strip().lower() for s in sources.split(",") if s.strip()} if sources else set()
+
+    def want(source: str) -> bool:
+        return not enabled or source in enabled
+
     is_india = country.lower() == "in"
     india_location = location or ("India" if is_india else "")
     country_indeed = "India" if is_india else "USA"
@@ -349,19 +354,23 @@ async def jobs_feed(
     tasks = []
 
     for platform in platforms:
-        tasks.append(fetch_jobspy_platform(
-            platform,
-            search=search_q,
-            location=india_location,
-            country_indeed=country_indeed,
-            is_remote=is_remote,
-            job_type=job_type,
-        ))
+        if want(platform):
+            tasks.append(fetch_jobspy_platform(
+                platform,
+                search=search_q,
+                location=india_location,
+                country_indeed=country_indeed,
+                is_remote=is_remote,
+                job_type=job_type,
+            ))
 
-    tasks.append(fetch_jobicy_jobs(search_q))
-    tasks.append(fetch_remotive_jobs(search_q, category))
-    for co in GREENHOUSE_COMPANIES[:15] + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"]:
-        tasks.append(fetch_greenhouse_jobs(co))
+    if want("jobicy"):
+        tasks.append(fetch_jobicy_jobs(search_q))
+    if want("remotive"):
+        tasks.append(fetch_remotive_jobs(search_q, category))
+    if want("greenhouse"):
+        for co in GREENHOUSE_COMPANIES[:15] + [c["handle"] for c in custom_companies if c["platform"] == "greenhouse"]:
+            tasks.append(fetch_greenhouse_jobs(co))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
