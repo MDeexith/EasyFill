@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-let BASE_URL = 'http://10.215.14.91:8000';
+let BASE_URL = 'http://192.168.0.106:8000';
 
 export function setBackendUrl(url) {
   BASE_URL = url.replace(/\/$/, '');

@@ -232,24 +232,55 @@ function tryComboboxFill(el, value) {
   if (role !== 'combobox' && hasPopup !== 'listbox' && !controls) return false;
 
   fireFocus(el);
-  setNativeInput(el, value);
 
-  // Wait one tick for the listbox to render, then click the matching option.
+  // React Select opens its menu on focus; give it a tick before typing to filter.
   setTimeout(function() {
-    try {
-      var listbox = controls ? document.getElementById(controls) :
-        document.querySelector('[role="listbox"]');
-      if (!listbox) return;
-      var options = listbox.querySelectorAll('[role="option"]');
-      for (var i = 0; i < options.length; i++) {
-        var t = (options[i].innerText || options[i].textContent || '').trim().toLowerCase();
-        if (t === String(value).toLowerCase() || t.indexOf(String(value).toLowerCase()) !== -1) {
-          options[i].click();
-          return;
+    setNativeInput(el, value);
+
+    var MAX_ATTEMPTS = 3;
+    var attempt = 0;
+
+    function tryClick() {
+      attempt++;
+      setTimeout(function() {
+        try {
+          var listbox = controls ? document.getElementById(controls) :
+            document.querySelector('[role="listbox"]');
+          if (!listbox) {
+            if (attempt < MAX_ATTEMPTS) tryClick();
+            return;
+          }
+          var options = listbox.querySelectorAll('[role="option"]');
+          if (!options.length) {
+            if (attempt < MAX_ATTEMPTS) tryClick();
+            return;
+          }
+          var val = String(value).toLowerCase();
+          for (var i = 0; i < options.length; i++) {
+            var t = (options[i].innerText || options[i].textContent || '').trim().toLowerCase();
+            if (t === val || t.indexOf(val) !== -1) {
+              try { options[i].dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); } catch(e) {}
+              try { options[i].dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch(e) {}
+              options[i].click();
+              return;
+            }
+          }
+          // No text match — keyboard-select first visible option as fallback.
+          try {
+            el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
+            setTimeout(function() {
+              el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+            }, 100);
+          } catch(e) {}
+        } catch (e) {
+          if (attempt < MAX_ATTEMPTS) tryClick();
         }
-      }
-    } catch (e) {}
-  }, 80);
+      }, 350);
+    }
+
+    tryClick();
+  }, 50);
+
   return true;
 }
 
@@ -377,6 +408,32 @@ export function buildFillScript(mapping, profileJson) {
   if (window.ReactNativeWebView) {
     window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'FILL_COMPLETE', filled: filled }));
   }
+})();
+  `;
+}
+
+export function buildCorrectionListenerScript(filledAfIds) {
+  const filledMap = Object.fromEntries((filledAfIds || []).map(id => [id, true]));
+  return `
+(function() {
+  if (window.__AF_CORRECTION_LISTENER__) return;
+  window.__AF_CORRECTION_LISTENER__ = true;
+  var filled = ${safeJson(filledMap)};
+  document.addEventListener('blur', function(e) {
+    var el = e.target;
+    var afId = el.getAttribute && el.getAttribute('data-af-id');
+    if (!afId) return;
+    var value = (el.value || el.textContent || '').trim();
+    if (!value) return;
+    if (window.ReactNativeWebView) {
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        type: 'USER_INPUT_DETECTED',
+        afId: afId,
+        value: value,
+        wasAutoFilled: !!filled[afId],
+      }));
+    }
+  }, true);
 })();
   `;
 }

@@ -20,13 +20,78 @@ import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
 import { FORM_SCANNER_JS } from '../webview/formScanner';
 
-import { buildFillScript, buildDirectFillScript } from '../webview/filler';
+import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript } from '../webview/filler';
 import { matchFieldsToProfile } from '../matcher';
 import { generateText } from '../api/backend';
-import { loadProfile, addHistoryEntry } from '../profile/store';
+import { loadProfile, addHistoryEntry, loadFieldCorrections, mergeFieldCorrections } from '../profile/store';
 
 function getHostname(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
+}
+
+// Known career-site URL patterns that wrap a Greenhouse iframe. We rewrite
+// these to the embed URL on first load so the WebView never has to render
+// the parent page or follow Greenhouse's 3-4 redirect chain to the wrapper
+// page. Returns null when the URL doesn't match a known pattern.
+//
+// Patterns handled:
+//   1. Greenhouse listing pages (most common feed `applyUrl`):
+//        https://boards.greenhouse.io/<company>/jobs/<token>
+//        https://job-boards.greenhouse.io/<company>/jobs/<token>
+//   2. Greenhouse embed page (already-embed, just normalized):
+//        https://job-boards.greenhouse.io/embed/job_app?for=<company>&token=<token>
+//   3. Stripe wrapper:
+//        https://stripe.com/jobs/listing/<slug>/<token>(/apply)?
+//   4. Databricks wrapper:
+//        https://www.databricks.com/company/careers/<cat>/<slug>-<token>
+function transformCareerUrl(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.replace(/^www\./, '');
+    let company = '';
+    let token = '';
+
+    // Greenhouse listing — by far the most common shape coming out of feeds.
+    if (host === 'boards.greenhouse.io' || host === 'job-boards.greenhouse.io') {
+      // Already an embed URL? Honour it as-is (ensures we don't loop).
+      if (u.pathname.startsWith('/embed/job_app')) return null;
+      const m = u.pathname.match(/^\/([a-z0-9_-]+)\/jobs\/(\d{6,})\/?$/i);
+      if (m) { company = m[1]; token = m[2]; }
+    }
+
+    // Stripe.
+    if (!token && host === 'stripe.com') {
+      const m = u.pathname.match(/\/jobs\/listing\/[^/]+\/(\d{6,})(?:\/apply)?\/?$/);
+      if (m) { company = 'stripe'; token = m[1]; }
+    }
+
+    // Databricks.
+    if (!token && host === 'databricks.com') {
+      const m = u.pathname.match(/\/company\/careers\/[^/]+\/.*?-(\d{6,})\/?$/);
+      if (m) { company = 'databricks'; token = m[1]; }
+    }
+
+    // Universal `?gh_jid=<token>` fallback. Greenhouse appends this query
+    // param on every redirect hop, so any URL on a host we recognise but
+    // whose pathname didn't match still gives us the token. The company
+    // slug falls back to the bare hostname (works for stripe.com,
+    // databricks.com, and any other single-brand domain).
+    if (!token) {
+      const ghJid = u.searchParams.get('gh_jid');
+      if (ghJid && /^\d{6,}$/.test(ghJid) && host && host !== 'localhost') {
+        const slug = host.split('.')[0];
+        if (slug && slug !== 'greenhouse') {
+          company = slug;
+          token = ghJid;
+        }
+      }
+    }
+
+    if (company && token) {
+      return `https://job-boards.greenhouse.io/embed/job_app?for=${encodeURIComponent(company)}&token=${encodeURIComponent(token)}`;
+    }
+  } catch (e) {}
+  return null;
 }
 
 // Force all shadow roots open before page scripts run so our scanner can traverse them.
@@ -45,20 +110,33 @@ export default function BrowserScreen({ route, navigation }) {
   const { url } = route.params;
   const webViewRef = useRef(null);
   const [loading, setLoading] = useState(true);
-  const [currentUrl, setCurrentUrl] = useState(url);
+  // Pre-transform known career-site URLs (Stripe, Databricks, …) to their
+  // Greenhouse embed form on initial load, so the WebView never wastes a
+  // round-trip rendering the parent page wrapper. Falls through to the
+  // original URL when the pattern doesn't match — runtime ATS detection
+  // (formScanner.tryEagerGreenhouseDetect) handles everything else.
+  const initialUrl = transformCareerUrl(url) || url;
+  // webViewSource is React-controlled so we can navigate the WebView by
+  // updating state — more reliable than injecting `window.location.href`
+  // which can race with the parent page's own navigation handlers.
+  const [webViewSource, setWebViewSource] = useState({ uri: initialUrl });
+  const [currentUrl, setCurrentUrl] = useState(initialUrl);
   const [pageTitle, setPageTitle] = useState('');
   const [fields, setFields] = useState([]);
   const [phase, setPhase] = useState('loading');
-  // phase: loading | detected | panel | filling | drafting | filled
+  // phase: loading | detected | panel | filling | drafting | filled | ats-loading
   const [filledCount, setFilledCount] = useState(0);
   const [draftProgress, setDraftProgress] = useState({ current: 0, total: 0 });
   const [tracked, setTracked] = useState(false);
   const [webViewCanGoBack, setWebViewCanGoBack] = useState(false);
   const [fillStats, setFillStats] = useState({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+  const [pendingCorrections, setPendingCorrections] = useState({});
 
-  const urlRef = useRef(url);
+  const urlRef = useRef(initialUrl);
   const titleRef = useRef('');
-  const lastAtsSrcRef = useRef('');
+  // If we pre-transformed the URL, mark it as already-handled so the runtime
+  // ATS detector doesn't try to navigate to the same URL again.
+  const lastAtsSrcRef = useRef(initialUrl !== url ? initialUrl : '');
 
   const { width: screenW, height: screenH } = useWindowDimensions();
   const FAB_W = 180;
@@ -133,13 +211,15 @@ export default function BrowserScreen({ route, navigation }) {
   // After page load, if no FIELDS_SCANNED message ever arrives, fall into a
   // 'no-fields' state so the user gets a manual "Scan again" affordance
   // instead of an invisible feature.
+  // We don't trigger this during 'ats-loading' since we're mid-navigation
+  // from a parent page (Stripe/Databricks) to the actual embed form.
   useEffect(() => {
     if (loading) return;
     if (fields.length > 0) return;
     if (phase !== 'loading') return;
     const timer = setTimeout(() => {
       setPhase(prev => (prev === 'loading' ? 'no-fields' : prev));
-    }, 4000);
+    }, 8000);
     return () => clearTimeout(timer);
   }, [loading, fields.length, phase]);
 
@@ -286,6 +366,24 @@ export default function BrowserScreen({ route, navigation }) {
       const script = buildFillScript(mapping, JSON.stringify(profile));
       webViewRef.current?.injectJavaScript(script);
 
+      // Apply saved corrections for fields the profile didn't cover
+      const corrections = loadFieldCorrections();
+      const correctionFills = {};
+      for (const f of scanned) {
+        if (mapping[f.id]) continue;
+        const fp = [f.name||'', f.label||'', f.type||'', f.autocomplete||''].join('|');
+        if (fp.split('|').filter(Boolean).length < 2) continue;
+        if (corrections[fp] !== undefined) correctionFills[f.id] = corrections[fp];
+      }
+      if (Object.keys(correctionFills).length > 0) {
+        webViewRef.current?.injectJavaScript(buildDirectFillScript(correctionFills));
+      }
+
+      // Inject correction listener to detect future manual inputs on missed fields
+      webViewRef.current?.injectJavaScript(
+        buildCorrectionListenerScript(Object.keys(mapping))
+      );
+
       const longs = scanned.filter(f => f.longform);
       if (longs.length > 0) {
         await doAiDraft(longs);
@@ -299,10 +397,23 @@ export default function BrowserScreen({ route, navigation }) {
     setPhase('loading');
     setFields([]);
     setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
-    // Clear the install guard so the scanner re-runs from scratch.
-    webViewRef.current?.injectJavaScript('window.__AF_SCANNER_INSTALLED__ = false; true;');
+    // Clear ALL guards so the scanner re-runs from scratch and ATS detection
+    // can re-fire (otherwise stale __AF_ATS_REPORTED__ entries silence repeats).
+    lastAtsSrcRef.current = '';
+    webViewRef.current?.injectJavaScript(
+      'window.__AF_SCANNER_INSTALLED__ = false;' +
+      'window.__AF_ATS_REPORTED__ = {};' +
+      'window.__AF_ATS_PRIMED__ = false;' +
+      'window.__AF_ATS_POLL_STARTED__ = false;' +
+      'true;'
+    );
     webViewRef.current?.injectJavaScript(FORM_SCANNER_JS + '; true;');
   }, []);
+
+  const handleSaveCorrections = useCallback(() => {
+    mergeFieldCorrections(pendingCorrections);
+    setPendingCorrections({});
+  }, [pendingCorrections]);
 
   const onShouldStartLoadWithRequest = useCallback((request) => {
     const { url: reqUrl } = request;
@@ -323,6 +434,20 @@ export default function BrowserScreen({ route, navigation }) {
       Linking.openURL(reqUrl).catch(() => {});
       return false;
     }
+
+    // Intercept any in-flight navigation to a known career-site URL and
+    // short-circuit to the Greenhouse embed URL. Catches the redirect chain
+    //   boards.greenhouse.io/X/jobs/Y → 302 → stripe.com/jobs/search?gh_jid=Y
+    //   → 301 → stripe.com/jobs/listing/.../Y
+    // before the WebView has to render the wrapper page.
+    const transformed = transformCareerUrl(reqUrl);
+    if (transformed && transformed !== reqUrl && lastAtsSrcRef.current !== transformed) {
+      lastAtsSrcRef.current = transformed;
+      setPhase('ats-loading');
+      setWebViewSource({ uri: transformed });
+      return false;
+    }
+
     return true;
   }, []);
 
@@ -348,30 +473,44 @@ export default function BrowserScreen({ route, navigation }) {
         const scanned = data.fields || [];
         setFields(scanned);
         if (scanned.length > 0) {
-          setPhase(prev => (prev === 'loading' || prev === 'no-fields') ? 'detected' : prev);
+          setPhase(prev =>
+            (prev === 'loading' || prev === 'no-fields' || prev === 'ats-loading')
+              ? 'detected' : prev
+          );
         }
       }
 
       if (data.type === 'ATS_IFRAME_DETECTED') {
-        let atsSrc = data.src;
-        if (atsSrc) {
-          try {
-            const u = new URL(atsSrc);
-            if (/greenhouse\.io$/i.test(u.hostname) && u.pathname.includes('/embed/job_app')) {
-              const company = u.searchParams.get('for');
-              const token = u.searchParams.get('token');
-              if (company && token) {
-                atsSrc = `https://${u.hostname}/${company}/jobs/${token}`;
-              }
-            }
-          } catch (e) {}
-          // Guard against redirect loops: only navigate if target has changed
-          if (lastAtsSrcRef.current !== atsSrc) {
-            lastAtsSrcRef.current = atsSrc;
-            webViewRef.current?.injectJavaScript(
-              `window.location.href = ${JSON.stringify(atsSrc)}; true;`
-            );
-          }
+        const atsSrc = data.src;
+        // Navigate directly to the embed URL — it loads the full form standalone.
+        // Do NOT transform to the listing page: that page re-embeds the same iframe
+        // and Databricks forms include a validityToken that would be stripped.
+        if (atsSrc && lastAtsSrcRef.current !== atsSrc) {
+          lastAtsSrcRef.current = atsSrc;
+          setPhase('ats-loading');
+          // Belt-and-suspenders navigation:
+          //   1. injectJavaScript window.location.replace — synchronous in the
+          //      page context, works on every react-native-webview version,
+          //      bypasses any same-source dedupe in React state.
+          //   2. setWebViewSource — keeps React's notion of the URL in sync so
+          //      `source` prop matches actual WebView URL after navigation.
+          // Empirically (1) alone is reliable on Android; (2) alone has been
+          // flaky when the WebView has already done internal navigations.
+          webViewRef.current?.injectJavaScript(
+            `window.location.replace(${JSON.stringify(atsSrc)}); true;`
+          );
+          setWebViewSource({ uri: atsSrc });
+          // Greenhouse React SPA hydrates 1-4s after load. onLoadEnd injects the
+          // scanner immediately (too early). Re-inject at 2s, 4s, 7s so we catch
+          // fields that appear after React renders the form.
+          [2000, 4000, 7000].forEach(delay => {
+            setTimeout(() => {
+              webViewRef.current?.injectJavaScript(
+                'window.__AF_SCANNER_INSTALLED__ = false; true;'
+              );
+              webViewRef.current?.injectJavaScript(FORM_SCANNER_JS + '; true;');
+            }, delay);
+          });
         }
       }
 
@@ -383,7 +522,10 @@ export default function BrowserScreen({ route, navigation }) {
           return added.length > 0 ? [...prev, ...added] : prev;
         });
         if (newFields.length > 0) {
-          setPhase(prev => (prev === 'loading' || prev === 'no-fields') ? 'detected' : prev);
+          setPhase(prev =>
+            (prev === 'loading' || prev === 'no-fields' || prev === 'ats-loading')
+              ? 'detected' : prev
+          );
         }
       }
 
@@ -409,6 +551,34 @@ export default function BrowserScreen({ route, navigation }) {
         const n = data.filled ?? 0;
         setFilledCount(prev => prev + n);
         setPhase(prev => prev === 'drafting' ? 'filled' : prev);
+      }
+
+      if (data.type === 'DIAG') {
+        // Diagnostic info is logged only — surfaces in `adb logcat | grep AF`
+        // for development; never shown in the UI.
+        try {
+          console.log('[AF DIAG]', data.stage, JSON.stringify({
+            url: data.url,
+            iframes: data.iframeCount,
+            srcs: data.iframeSrcs,
+            ghApp: data.hasGhApp,
+            ghid: data.ghid,
+            inputs: data.inputCount,
+          }));
+        } catch (e) {}
+      }
+
+      if (data.type === 'USER_INPUT_DETECTED') {
+        const { afId, value, wasAutoFilled } = data;
+        if (wasAutoFilled) return;
+        setFields(currentFields => {
+          const field = currentFields.find(f => f.id === afId);
+          if (!field) return currentFields;
+          const fp = [field.name||'', field.label||'', field.type||'', field.autocomplete||''].join('|');
+          if (fp.split('|').filter(Boolean).length < 2) return currentFields;
+          setPendingCorrections(prev => ({ ...prev, [fp]: value }));
+          return currentFields;
+        });
       }
     } catch {}
   }, []);
@@ -450,10 +620,18 @@ export default function BrowserScreen({ route, navigation }) {
       <View style={{ flex: 1, position: 'relative' }}>
         <WebView
           ref={webViewRef}
-          source={{ uri: url }}
+          source={webViewSource}
           style={{ flex: 1, backgroundColor: '#fff' }}
           injectedJavaScriptBeforeContentLoaded={SHADOW_DOM_OPENER}
-          onLoadStart={() => { setLoading(true); setPhase('loading'); setFields([]); setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 }); }}
+          onLoadStart={() => {
+            setLoading(true);
+            setFields([]);
+            setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+            setPendingCorrections({});
+            // Preserve 'ats-loading' so the user sees the "Opening application
+            // form…" banner uninterrupted across the parent→embed navigation.
+            setPhase(prev => prev === 'ats-loading' ? prev : 'loading');
+          }}
           onLoadEnd={() => {
             setLoading(false);
             lastInjectedUrl.current = urlRef.current;
@@ -463,18 +641,20 @@ export default function BrowserScreen({ route, navigation }) {
             setCurrentUrl(state.url);
             setPageTitle(state.title || '');
             setWebViewCanGoBack(state.canGoBack);
+            const prevUrl = urlRef.current;
             urlRef.current = state.url;
             titleRef.current = state.title || '';
             // Catch SPA route changes that don't trigger onLoadEnd
             if (state.url && state.url !== lastInjectedUrl.current) {
               lastInjectedUrl.current = state.url;
-              setPhase('loading');
+              setPhase(prev => prev === 'ats-loading' ? prev : 'loading');
               setFields([]);
               setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+              setPendingCorrections({});
               // Reset ATS loop guard when hostname changes so a new job page on the
               // same company's ATS gets a fresh transform attempt.
               try {
-                const prevHost = new URL(urlRef.current).hostname;
+                const prevHost = new URL(prevUrl).hostname;
                 const nextHost = new URL(state.url).hostname;
                 if (prevHost !== nextHost) lastAtsSrcRef.current = '';
               } catch {}
@@ -502,6 +682,16 @@ export default function BrowserScreen({ route, navigation }) {
             <ActivityIndicator size="large" color={theme.colors.ink} />
           </View>
         )}
+
+        {phase === 'ats-loading' && (
+          <View style={styles.atsBanner}>
+            <ActivityIndicator size="small" color={theme.colors.accentInk} />
+            <Text style={styles.atsBannerText}>
+              Opening application form…
+            </Text>
+          </View>
+        )}
+
 
 
 
@@ -663,6 +853,20 @@ export default function BrowserScreen({ route, navigation }) {
               )}
             </View>
           </Animated.View>
+        )}
+
+        {phase === 'filled' && Object.keys(pendingCorrections).length > 0 && (
+          <View style={styles.memorySave}>
+            <TouchableOpacity onPress={handleSaveCorrections} activeOpacity={0.8} style={styles.memorySaveBtn}>
+              <Icon name="bookmark" size={12} color={theme.colors.accentInk} strokeWidth={2} />
+              <Text style={styles.memorySaveText}>
+                Save {Object.keys(pendingCorrections).length} answer{Object.keys(pendingCorrections).length > 1 ? 's' : ''} to memory
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setPendingCorrections({})} activeOpacity={0.7} style={styles.memorySaveDismiss}>
+              <Icon name="close" size={11} color={theme.colors.muted} />
+            </TouchableOpacity>
+          </View>
         )}
       </View>
     </SafeAreaView>
@@ -880,4 +1084,61 @@ const styles = StyleSheet.create({
     backgroundColor: theme.colors.accent,
     borderRadius: 3,
   },
+
+  // Memory save chip
+  memorySave: {
+    position: 'absolute',
+    bottom: 80,
+    left: 16,
+    right: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: theme.colors.surface2,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: 14,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    gap: 8,
+    ...theme.shadow.lg,
+  },
+  memorySaveBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  memorySaveText: {
+    fontSize: 12,
+    fontFamily: theme.font.sans,
+    fontWeight: '600',
+    color: theme.colors.accentInk,
+  },
+  memorySaveDismiss: {
+    padding: 4,
+  },
+
+  atsBanner: {
+    position: 'absolute',
+    top: 12,
+    left: 12,
+    right: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: theme.colors.accentSoft,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    gap: 10,
+    ...theme.shadow.lg,
+  },
+  atsBannerText: {
+    fontSize: 13,
+    fontFamily: theme.font.sans,
+    fontWeight: '600',
+    color: theme.colors.accentInk,
+  },
+
 });

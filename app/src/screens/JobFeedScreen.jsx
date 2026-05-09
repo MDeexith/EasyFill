@@ -159,7 +159,7 @@ export default function JobFeedScreen({ navigation }) {
   const [selectedSource, setSelectedSource] = useState('all');
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [locationFilter, setLocationFilter] = useState('');
-  const [locationChip, setLocationChip] = useState('India');
+  const [locationChip, setLocationChip] = useState('Any');
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [totalCount, setTotalCount] = useState(0);
@@ -182,7 +182,6 @@ export default function JobFeedScreen({ navigation }) {
     unstable_batchedUpdates(() => {
       if (isRefresh) setRefreshing(true);
       else if (!isLoadMore) setLoading(true);
-      setError(null);
     });
 
     try {
@@ -209,6 +208,7 @@ export default function JobFeedScreen({ navigation }) {
         setHasMore(result.hasMore || false);
         setTotalCount(result.total || 0);
         setPage(pageNum);
+        setError(null);
         setLoading(false);
         setRefreshing(false);
       });

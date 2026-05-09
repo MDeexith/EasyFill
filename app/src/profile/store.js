@@ -200,3 +200,24 @@ export function clearMappingCache() {
   storage.remove(MAPPING_CACHE_KEY);
 }
 
+// ─── Field corrections (autofill memory) ───────────────────────────
+// Stores fingerprint → direct value for fields autofill couldn't map.
+// Applied automatically on future fills before profile-based matching.
+
+const CORRECTIONS_KEY = 'field_corrections';
+
+export function loadFieldCorrections() {
+  const raw = storage.getString(CORRECTIONS_KEY);
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch { return {}; }
+}
+
+export function mergeFieldCorrections(entries) {
+  const existing = loadFieldCorrections();
+  storage.set(CORRECTIONS_KEY, JSON.stringify({ ...existing, ...entries }));
+}
+
+export function clearFieldCorrections() {
+  storage.remove(CORRECTIONS_KEY);
+}
+
