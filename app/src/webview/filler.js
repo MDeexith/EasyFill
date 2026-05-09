@@ -190,6 +190,82 @@ function waitForListbox(el, maxAttempts, intervalMs) {
   });
 }
 
+function clickCheckable(el, shouldBeChecked) {
+  // Set checked state imperatively, then dispatch the events React/Vue
+  // listen to. click() alone toggles unpredictably when state already matches.
+  if (!el) return false;
+  try {
+    if (typeof shouldBeChecked === 'boolean' && el.checked === shouldBeChecked) {
+      // Already in target state; still fire change so any onChange runs.
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+  } catch (e) {}
+  try {
+    var proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+    var desc = proto && Object.getOwnPropertyDescriptor(proto, 'checked');
+    if (desc && desc.set) desc.set.call(el, shouldBeChecked === false ? false : true);
+    else el.checked = shouldBeChecked === false ? false : true;
+  } catch (e) {
+    try { el.checked = shouldBeChecked === false ? false : true; } catch (_) {}
+  }
+  try { el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); } catch (e) {}
+  try { el.dispatchEvent(new Event('input',  { bubbles: true })); } catch (e) {}
+  try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+  return true;
+}
+
+function fillRadioGroup(options, value) {
+  if (!options || !options.length) return false;
+  var target = cleanOptText(value);
+  var best = null, bestScore = 0;
+  for (var i = 0; i < options.length; i++) {
+    var opt = options[i];
+    var lab = cleanOptText(opt.label);
+    var val = cleanOptText(opt.value);
+    var score = 0;
+    if (lab && lab === target) score = Math.max(score, 4);
+    if (val && val === target) score = Math.max(score, 4);
+    if (lab && lab.indexOf(target) === 0) score = Math.max(score, 3);
+    if (val && val.indexOf(target) === 0) score = Math.max(score, 3);
+    if (target.length >= 2 && lab && lab.indexOf(target) !== -1) score = Math.max(score, 2);
+    if (target.length >= 2 && val && val.indexOf(target) !== -1) score = Math.max(score, 2);
+    // Common boolean-style mappings
+    if (/^(yes|true|1|y)$/.test(target) && /^(yes|i (am|do)|authorized|true)/.test(lab)) score = Math.max(score, 3);
+    if (/^(no|false|0|n)$/.test(target)  && /^(no|i (am not|do not)|not authorized|false)/.test(lab)) score = Math.max(score, 3);
+    if (score > bestScore) { bestScore = score; best = opt; }
+  }
+  if (!best) return false;
+  var radio = findEl(best.afId);
+  if (!radio) return false;
+  return clickCheckable(radio, true);
+}
+
+function fillCheckboxGroup(options, value) {
+  if (!options || !options.length) return false;
+  var values = String(value).split(',').map(function(s) { return cleanOptText(s); }).filter(Boolean);
+  if (values.length === 0) return false;
+  var hits = 0;
+  for (var i = 0; i < options.length; i++) {
+    var opt = options[i];
+    var lab = cleanOptText(opt.label);
+    var val = cleanOptText(opt.value);
+    var match = false;
+    for (var v = 0; v < values.length; v++) {
+      var t = values[v];
+      if (!t) continue;
+      if (t === lab || t === val) { match = true; break; }
+      if (t.length >= 2 && (lab.indexOf(t) !== -1 || val.indexOf(t) !== -1)) { match = true; break; }
+      if (lab.length >= 2 && t.indexOf(lab) !== -1) { match = true; break; }
+    }
+    if (!match) continue;
+    var box = findEl(opt.afId);
+    if (!box) continue;
+    if (clickCheckable(box, true)) hits++;
+  }
+  return hits > 0;
+}
+
 function tryButtonDropdownFill(el, value) {
   return new Promise(function(resolve) {
     try {
@@ -466,14 +542,35 @@ export function buildDirectFillScript(valuesById) {
   `;
 }
 
-export function buildFillScript(mapping, profileJson) {
+// Build a compact map of group-style fields keyed by af-id so the runtime
+// can route radio-group / checkbox-group fills (which need options[]).
+function buildGroupMeta(fields) {
+  const meta = {};
+  if (!Array.isArray(fields)) return meta;
+  for (const f of fields) {
+    if (!f || !f.id) continue;
+    if (f.widget === 'radio-group' || f.widget === 'checkbox-group') {
+      meta[f.id] = {
+        widget: f.widget,
+        options: (f.options || []).map(o => ({
+          afId: o.afId, value: o.value || '', label: o.label || '',
+        })),
+      };
+    }
+  }
+  return meta;
+}
+
+export function buildFillScript(mapping, profileJson, fields) {
   // profileJson is already a JSON string (existing callers pass JSON.stringify(profile)).
   // Re-encode through safeJson to neutralise any embedded "</script>" sequence.
   const safeProfile = safeJson(JSON.parse(profileJson));
+  const groupMeta = buildGroupMeta(fields);
   return `
 (function() {
   var profile = ${safeProfile};
   var mapping = ${safeJson(mapping)};
+  var groupMeta = ${safeJson(groupMeta)};
   ${FILLER_RUNTIME}
 
   // Profile keys whose value is a comma-separated list and which should be
@@ -491,6 +588,17 @@ export function buildFillScript(mapping, profileJson) {
       val = profile.salary;
     }
     if (val === undefined || val === null || val === '') return;
+
+    // Radio / checkbox group: routed via options[], not a single el.
+    var meta = groupMeta[fieldId];
+    if (meta && meta.widget === 'radio-group') {
+      if (fillRadioGroup(meta.options, val)) filled++;
+      return;
+    }
+    if (meta && meta.widget === 'checkbox-group') {
+      if (fillCheckboxGroup(meta.options, val)) filled++;
+      return;
+    }
 
     var el = findEl(fieldId);
     if (!el) return;

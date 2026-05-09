@@ -26,10 +26,13 @@ import {
 import { PROFILE_FIELD_LABELS } from '../profile/schema';
 
 const SECTIONS = [
-  { title: 'Identity', fields: ['firstName', 'lastName', 'email', 'phone'] },
+  { title: 'Identity', fields: ['firstName', 'lastName', 'email', 'phone', 'pronouns', 'dateOfBirth', 'gender'] },
   { title: 'Location', fields: ['city', 'state', 'country', 'zipCode'] },
   { title: 'Links', fields: ['linkedIn', 'portfolio', 'github'] },
   { title: 'Work', fields: ['currentTitle', 'currentCompany', 'yearsExperience', 'salary', 'startDate', 'skills'] },
+  // For yes/no questions enter exactly "Yes" or "No" — the autofill engine
+  // matches these against radio/select option labels at fill time.
+  { title: 'Eligibility', fields: ['workAuthorization', 'willingToRelocate', 'noticePeriod'] },
   { title: 'Cover letter', fields: ['coverLetter'] },
 ];
 

@@ -124,13 +124,17 @@ export default function BrowserScreen({ route, navigation }) {
   const [pageTitle, setPageTitle] = useState('');
   const [fields, setFields] = useState([]);
   const [phase, setPhase] = useState('loading');
-  // phase: loading | detected | panel | filling | drafting | filled | ats-loading
+  // phase: loading | detected | panel | filling | filling-ai | drafting | filled | ats-loading
   const [filledCount, setFilledCount] = useState(0);
   const [draftProgress, setDraftProgress] = useState({ current: 0, total: 0 });
   const [tracked, setTracked] = useState(false);
   const [webViewCanGoBack, setWebViewCanGoBack] = useState(false);
   const [fillStats, setFillStats] = useState({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
   const [pendingCorrections, setPendingCorrections] = useState({});
+  const [multiStepActive, setMultiStepActive] = useState(false);
+  const [stepCount, setStepCount] = useState(1);
+  const multiStepActiveRef = useRef(false);
+  const filledUrlsRef = useRef(new Set());
 
   const urlRef = useRef(initialUrl);
   const titleRef = useRef('');
@@ -177,12 +181,13 @@ export default function BrowserScreen({ route, navigation }) {
   const fabAnim = useRef(new Animated.Value(0)).current;
   const panelAnim = useRef(new Animated.Value(0)).current;
   const lastInjectedUrl = useRef('');
+  const fieldsRef = useRef([]);
 
   const longFormFields = fields.filter(f => f.longform);
   const fieldCount = fields.length;
 
   useEffect(() => {
-    const shouldShowFab = phase === 'detected' || phase === 'filled' || phase === 'no-fields';
+    const shouldShowFab = phase === 'detected' || phase === 'filled' || phase === 'no-fields' || phase === 'filling-ai';
     Animated.spring(fabAnim, {
       toValue: shouldShowFab ? 1 : 0,
       useNativeDriver: false,
@@ -198,12 +203,14 @@ export default function BrowserScreen({ route, navigation }) {
     return () => clearTimeout(timer);
   }, [loading]);
 
-  // Safety net: if filling/drafting hangs (backend timeout, network error),
+  // Safety net: if filling/filling-ai/drafting hangs (backend timeout, network error),
   // revert to detected after 25s so user can retry.
   useEffect(() => {
-    if (phase !== 'filling' && phase !== 'drafting') return;
+    if (phase !== 'filling' && phase !== 'filling-ai' && phase !== 'drafting') return;
     const timer = setTimeout(() => {
-      setPhase(prev => (prev === 'filling' || prev === 'drafting') ? 'detected' : prev);
+      setPhase(prev =>
+        (prev === 'filling' || prev === 'filling-ai' || prev === 'drafting') ? 'detected' : prev
+      );
     }, 25000);
     return () => clearTimeout(timer);
   }, [phase]);
@@ -232,6 +239,9 @@ export default function BrowserScreen({ route, navigation }) {
       friction: 9,
     }).start();
   }, [phase, panelAnim]);
+
+  useEffect(() => { multiStepActiveRef.current = multiStepActive; }, [multiStepActive]);
+  useEffect(() => { fieldsRef.current = fields; }, [fields]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') return;
@@ -342,35 +352,70 @@ export default function BrowserScreen({ route, navigation }) {
     }
   }, []);
 
-  // Unified autofill: priority pipeline (autocomplete/type > AI > regex),
-  // followed by long-form AI drafting.
+  // Unified autofill: two-pass progressive fill.
+  // Pass 1 (cache + regex) injects immediately; Pass 2 (AI) fills remaining in background.
   const doAutofill = useCallback(async (scanned) => {
     setPhase('filling');
     setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+    filledUrlsRef.current.add(urlRef.current);
     try {
       const profile = enrichProfile(loadProfile());
+      const host = getHostname(urlRef.current);
 
-      const { mapping, decisions } = await matchFieldsToProfile(scanned, profile, true, getHostname(urlRef.current));
+      // ── PASS 1: cache + regex (no AI) ───────────────────────────────────
+      const { mapping: fastMapping, decisions: fastDecisions } =
+        await matchFieldsToProfile(scanned, profile, false, host);
 
-      let autoMatched = 0;
-      let aiMatched = 0;
-      let regexMatched = 0;
-      for (const dec of Object.values(decisions || {})) {
-        if (!dec || !dec.key) continue;
+      webViewRef.current?.injectJavaScript(
+        buildFillScript(fastMapping, JSON.stringify(profile), scanned)
+      );
+
+      let autoMatched = 0, regexMatched = 0;
+      for (const dec of Object.values(fastDecisions || {})) {
+        if (!dec?.key) continue;
         if (dec.source === 'autocomplete' || dec.source === 'type' || dec.source === 'cache') autoMatched++;
-        else if (dec.source === 'ai' || dec.source === 'ai-low') aiMatched++;
         else regexMatched++;
       }
-      setFillStats({ autoMatched, aiMatched, regexMatched });
+      setFillStats({ autoMatched, aiMatched: 0, regexMatched });
 
-      const script = buildFillScript(mapping, JSON.stringify(profile));
-      webViewRef.current?.injectJavaScript(script);
+      // FAB appears now — user can interact with fast-filled fields
+      setPhase('filling-ai');
+
+      // ── PASS 2: AI for uncovered fields ─────────────────────────────────
+      const uncovered = scanned.filter(f => !fastMapping[f.id]);
+      const fastKeys = new Set(Object.values(fastMapping));
+
+      if (uncovered.length > 0) {
+        try {
+          const { mapping: aiMapping, decisions: aiDecisions } =
+            await matchFieldsToProfile(uncovered, profile, true, null);
+
+          // Cross-pass dedup: skip keys already owned by fast pass
+          const safeAiMapping = {};
+          for (const [id, key] of Object.entries(aiMapping)) {
+            if (!fastKeys.has(key)) safeAiMapping[id] = key;
+          }
+
+          if (Object.keys(safeAiMapping).length > 0) {
+            webViewRef.current?.injectJavaScript(
+              buildFillScript(safeAiMapping, JSON.stringify(profile), uncovered)
+            );
+          }
+
+          let aiMatched = 0;
+          for (const dec of Object.values(aiDecisions || {})) {
+            if (!dec?.key) continue;
+            if (dec.source === 'ai' || dec.source === 'ai-low') aiMatched++;
+          }
+          setFillStats(prev => ({ ...prev, aiMatched }));
+        } catch { /* AI failed — fast fill stands */ }
+      }
 
       // Apply saved corrections for fields the profile didn't cover
       const corrections = loadFieldCorrections();
       const correctionFills = {};
       for (const f of scanned) {
-        if (mapping[f.id]) continue;
+        if (fastMapping[f.id]) continue;
         const fp = [f.name||'', f.label||'', f.type||'', f.autocomplete||''].join('|');
         if (fp.split('|').filter(Boolean).length < 2) continue;
         if (corrections[fp] !== undefined) correctionFills[f.id] = corrections[fp];
@@ -379,16 +424,20 @@ export default function BrowserScreen({ route, navigation }) {
         webViewRef.current?.injectJavaScript(buildDirectFillScript(correctionFills));
       }
 
-      // Inject correction listener to detect future manual inputs on missed fields
       webViewRef.current?.injectJavaScript(
-        buildCorrectionListenerScript(Object.keys(mapping))
+        buildCorrectionListenerScript(Object.keys(fastMapping))
       );
+
+      setMultiStepActive(true);
 
       const longs = scanned.filter(f => f.longform);
       if (longs.length > 0) {
         await doAiDraft(longs);
+      } else {
+        setPhase('filled');
       }
     } catch {
+      filledUrlsRef.current.delete(urlRef.current);
       setPhase('detected');
     }
   }, [doAiDraft]);
@@ -397,6 +446,9 @@ export default function BrowserScreen({ route, navigation }) {
     setPhase('loading');
     setFields([]);
     setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+    setMultiStepActive(false);
+    setStepCount(1);
+    filledUrlsRef.current.clear();
     // Clear ALL guards so the scanner re-runs from scratch and ATS detection
     // can re-fire (otherwise stale __AF_ATS_REPORTED__ entries silence repeats).
     lastAtsSrcRef.current = '';
@@ -473,10 +525,19 @@ export default function BrowserScreen({ route, navigation }) {
         const scanned = data.fields || [];
         setFields(scanned);
         if (scanned.length > 0) {
-          setPhase(prev =>
-            (prev === 'loading' || prev === 'no-fields' || prev === 'ats-loading')
-              ? 'detected' : prev
-          );
+          if (
+            multiStepActiveRef.current &&
+            !filledUrlsRef.current.has(urlRef.current)
+          ) {
+            filledUrlsRef.current.add(urlRef.current);
+            setStepCount(prev => prev + 1);
+            setTimeout(() => doAutofill(scanned), 600);
+          } else {
+            setPhase(prev =>
+              (prev === 'loading' || prev === 'no-fields' || prev === 'ats-loading')
+                ? 'detected' : prev
+            );
+          }
         }
       }
 
@@ -516,16 +577,24 @@ export default function BrowserScreen({ route, navigation }) {
 
       if (data.type === 'FIELDS_UPDATED') {
         const newFields = data.fields || [];
-        setFields(prev => {
-          const existing = new Set(prev.map(f => f.id));
-          const added = newFields.filter(f => !existing.has(f.id));
-          return added.length > 0 ? [...prev, ...added] : prev;
-        });
         if (newFields.length > 0) {
-          setPhase(prev =>
-            (prev === 'loading' || prev === 'no-fields' || prev === 'ats-loading')
-              ? 'detected' : prev
-          );
+          const existing = new Set(fieldsRef.current.map(f => f.id));
+          const added = newFields.filter(f => !existing.has(f.id));
+          setFields(prev => added.length > 0 ? [...prev, ...added] : prev);
+          if (
+            multiStepActiveRef.current &&
+            !filledUrlsRef.current.has(urlRef.current) &&
+            added.length > 0
+          ) {
+            filledUrlsRef.current.add(urlRef.current);
+            setStepCount(s => s + 1);
+            setTimeout(() => doAutofill(added), 600);
+          } else {
+            setPhase(prev =>
+              (prev === 'loading' || prev === 'no-fields' || prev === 'ats-loading')
+                ? 'detected' : prev
+            );
+          }
         }
       }
 
@@ -544,7 +613,9 @@ export default function BrowserScreen({ route, navigation }) {
           }
           return prev;
         });
-        setTimeout(() => setPhase(prev => prev === 'filling' ? 'filled' : prev), 200);
+        // Safety net: if FILL_COMPLETE fires while still in 'filling', advance to 'filling-ai'
+        // (doAutofill controls the real filled transition after both passes complete)
+        setTimeout(() => setPhase(prev => prev === 'filling' ? 'filling-ai' : prev), 200);
       }
 
       if (data.type === 'AI_FILL_COMPLETE') {
@@ -581,7 +652,7 @@ export default function BrowserScreen({ route, navigation }) {
         });
       }
     } catch {}
-  }, []);
+  }, [doAutofill]);
 
   const host = getHostname(currentUrl);
 
@@ -656,7 +727,12 @@ export default function BrowserScreen({ route, navigation }) {
               try {
                 const prevHost = new URL(prevUrl).hostname;
                 const nextHost = new URL(state.url).hostname;
-                if (prevHost !== nextHost) lastAtsSrcRef.current = '';
+                if (prevHost !== nextHost) {
+                  lastAtsSrcRef.current = '';
+                  setMultiStepActive(false);
+                  setStepCount(1);
+                  filledUrlsRef.current.clear();
+                }
               } catch {}
               // Clear scanner guard + ATS report cache so detection re-fires on new page.
               webViewRef.current?.injectJavaScript(
@@ -695,7 +771,7 @@ export default function BrowserScreen({ route, navigation }) {
 
 
 
-        {(phase === 'detected' || phase === 'filled' || phase === 'no-fields') && (
+        {(phase === 'detected' || phase === 'filled' || phase === 'no-fields' || phase === 'filling-ai') && (
           <Animated.View
             {...panResponder.panHandlers}
             style={[
@@ -715,7 +791,8 @@ export default function BrowserScreen({ route, navigation }) {
               style={styles.fabBtn}
               onPress={() => {
                 if (isDragging.current) return;
-                phase === 'no-fields' ? manualRescan() : setPhase('panel');
+                if (phase === 'no-fields') manualRescan();
+                else if (phase !== 'filling-ai') setPhase('panel');
               }}
             >
               <View style={styles.fabDot}>
@@ -731,13 +808,19 @@ export default function BrowserScreen({ route, navigation }) {
                 />
               </View>
               <Text style={styles.fabText}>
-                {phase === 'filled'
-                  ? ((fillStats.autoMatched + fillStats.aiMatched) > 0
-                      ? `AI Auto:${fillStats.autoMatched + fillStats.aiMatched} · Regex:${fillStats.regexMatched}`
-                      : 'Filled')
-                  : phase === 'no-fields'
-                    ? 'No fields · tap to rescan'
-                    : 'Autofill ready'}
+                {phase === 'filling-ai'
+                  ? `${filledCount} filled · AI matching…`
+                  : phase === 'filled'
+                    ? (multiStepActive && stepCount > 1
+                        ? `Step ${stepCount} · ${filledCount} filled`
+                        : (fillStats.autoMatched + fillStats.aiMatched) > 0
+                            ? `AI Auto:${fillStats.autoMatched + fillStats.aiMatched} · Regex:${fillStats.regexMatched}`
+                            : 'Filled')
+                    : phase === 'no-fields'
+                      ? 'No fields · tap to rescan'
+                      : multiStepActive
+                        ? `Step ${stepCount} · Autofill ready`
+                        : 'Autofill ready'}
               </Text>
               {phase !== 'no-fields' && (
                 <View style={styles.fabCount}>

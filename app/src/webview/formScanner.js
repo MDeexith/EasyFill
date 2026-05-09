@@ -6,12 +6,14 @@ export const FORM_SCANNER_JS = `
   var AF_ATTR = 'data-af-id';
   var SKIP_ROLE_RE = /^(navigation|menu|menubar|tablist|toolbar|banner|contentinfo)$/i;
   var INPUT_SELECTOR =
-    'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=checkbox]):not([type=radio]):not([type=file]):not([aria-hidden="true"]),' +
+    'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([aria-hidden="true"]),' +
     'textarea, select, [contenteditable=""], [contenteditable="true"], [role="textbox"],' +
     // Button-style and div-style dropdowns (Headless UI, Radix, Workday, etc.)
     '[role="combobox"], [role="listbox"],' +
     'button[aria-haspopup="listbox"], button[aria-haspopup="menu"], button[aria-haspopup="true"],' +
-    '[aria-haspopup="listbox"], [aria-haspopup="menu"]';
+    '[aria-haspopup="listbox"], [aria-haspopup="menu"],' +
+    // ARIA-only radios/checkboxes (rare, but used by some custom controls)
+    '[role="radio"], [role="checkbox"]';
 
   // Stable counter so af_<n> ids never collide
   var afCounter = 0;
@@ -315,23 +317,26 @@ export const FORM_SCANNER_JS = `
   }
 
   // Classify the widget so the filler can route to the right strategy
-  // ('select', 'button-dropdown', 'combobox-input', 'contenteditable',
-  // 'textarea', 'text').
+  // ('select', 'button-dropdown', 'combobox-input', 'radio', 'checkbox',
+  // 'file', 'contenteditable', 'textarea', 'text').
   function classifyWidget(el, tag, contentEditable) {
     if (contentEditable) return 'contenteditable';
     if (tag === 'select') return 'select';
     if (tag === 'textarea') return 'textarea';
     var role = (el.getAttribute && el.getAttribute('role')) || '';
     var hasPopup = (el.getAttribute && el.getAttribute('aria-haspopup')) || '';
+    var rawType = ((el.getAttribute && el.getAttribute('type')) || '').toLowerCase();
     if (tag === 'input') {
-      // <input role="combobox"> — React Select, Headless UI Combobox, etc.
+      if (rawType === 'radio') return 'radio';
+      if (rawType === 'checkbox') return 'checkbox';
+      if (rawType === 'file') return 'file';
       if (role === 'combobox' || hasPopup === 'listbox' || hasPopup === 'menu') {
         return 'combobox-input';
       }
       return 'text';
     }
-    // Non-input dropdown: button / div with role/aria-haspopup signalling
-    // an opens-on-click options menu.
+    if (role === 'radio') return 'radio';
+    if (role === 'checkbox') return 'checkbox';
     if (
       tag === 'button' ||
       role === 'combobox' || role === 'listbox' ||
@@ -340,6 +345,58 @@ export const FORM_SCANNER_JS = `
       return 'button-dropdown';
     }
     return 'text';
+  }
+
+  // Group label for a radio/checkbox sibling-set (e.g. fieldset/legend, the
+  // <div role="radiogroup" aria-labelledby="...">, or the heading text that
+  // immediately precedes the group). Falls back to nearby text.
+  function getGroupLabelFor(el) {
+    var p = el.parentElement;
+    for (var i = 0; i < 6 && p; i++) {
+      if (p.tagName === 'FIELDSET') {
+        try {
+          var lg = p.querySelector(':scope > legend');
+          if (lg && lg.innerText && lg.innerText.trim()) {
+            return lg.innerText.trim().slice(0, 200);
+          }
+        } catch (e) {}
+      }
+      var role = p.getAttribute && p.getAttribute('role');
+      if (role === 'group' || role === 'radiogroup') {
+        var llby = p.getAttribute && p.getAttribute('aria-labelledby');
+        if (llby) {
+          try {
+            var doc = el.ownerDocument || document;
+            var ref = doc.getElementById(llby.split(/\\s+/)[0]);
+            if (ref && ref.innerText) return ref.innerText.trim().slice(0, 200);
+          } catch (e) {}
+        }
+        var al = p.getAttribute && p.getAttribute('aria-label');
+        if (al) return al.trim().slice(0, 200);
+      }
+      p = p.parentElement;
+    }
+    return getNearbyText(el);
+  }
+
+  // Visible label for one radio/checkbox (the option label, e.g. "Yes").
+  function getOptionLabelFor(el) {
+    var existing = preferredLabelFor(el);
+    if (existing) return existing.slice(0, 80);
+    // Text node or element directly following the input (<input> Yes pattern)
+    var n = el.nextSibling;
+    while (n) {
+      if (n.nodeType === 3 && n.textContent && n.textContent.trim()) {
+        return n.textContent.trim().slice(0, 80);
+      }
+      if (n.nodeType === 1) {
+        var t = ((n.innerText || n.textContent) || '').trim();
+        if (t) return t.slice(0, 80);
+        break;
+      }
+      n = n.nextSibling;
+    }
+    return (el.value || '').slice(0, 80);
   }
 
   // For non-input dropdowns we don't want to surface every UI button on the
@@ -375,15 +432,16 @@ export const FORM_SCANNER_JS = `
     var name = (el.getAttribute && el.getAttribute('name')) || '';
     var nearbyText = getNearbyText(el);
 
-    return {
+    var desc = {
       id: afId,
       domId: el.id || '',
       name: name,
       tag: tag,
       type: inputType,
       inputType: inputType,
-      // 'select' | 'button-dropdown' | 'combobox-input' | 'contenteditable' |
-      // 'textarea' | 'text' — used by the filler to pick a strategy.
+      // 'select' | 'button-dropdown' | 'combobox-input' | 'radio' |
+      // 'checkbox' | 'file' | 'contenteditable' | 'textarea' | 'text' —
+      // used by the filler to pick a strategy.
       widget: widget,
       autocomplete: (el.getAttribute && el.getAttribute('autocomplete')) || '',
       pattern: (el.getAttribute && el.getAttribute('pattern')) || '',
@@ -404,6 +462,16 @@ export const FORM_SCANNER_JS = `
         ? isLabeledDropdownTrigger(el, label, ariaLabel, name, nearbyText)
         : true,
     };
+
+    // For checkables, capture per-input metadata so scanForms() can fold
+    // sibling radios/checkboxes (same name) into one synthetic group field.
+    if (widget === 'radio' || widget === 'checkbox') {
+      desc._groupLabel = getGroupLabelFor(el);
+      desc._optionValue = (el.getAttribute && el.getAttribute('value')) || '';
+      desc._optionLabel = getOptionLabelFor(el);
+    }
+
+    return desc;
   }
 
   function scanForms() {
@@ -435,6 +503,74 @@ export const FORM_SCANNER_JS = `
       delete fld._droppable;
       unique.push(fld);
     }
+
+    // Fold sibling radios/checkboxes (same name attribute) into one synthetic
+    // group field with widget = radio-group / checkbox-group plus an options
+    // array. The group label is the legend / aria-labelledby / nearby
+    // heading; per-input labels become option labels.
+    var groups = {};
+    var standalone = [];
+    for (var g = 0; g < unique.length; g++) {
+      var item = unique[g];
+      if (item.widget === 'radio' || item.widget === 'checkbox') {
+        var key = (item.widget === 'radio' ? 'r:' : 'c:') + (item.name || ('__solo_' + item.id));
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(item);
+      } else {
+        // Strip helper fields from non-grouped items
+        delete item._groupLabel;
+        delete item._optionValue;
+        delete item._optionLabel;
+        standalone.push(item);
+      }
+    }
+
+    var grouped = [];
+    Object.keys(groups).forEach(function(gk) {
+      var members = groups[gk];
+      if (members.length <= 1) {
+        // Lone radio (unusual) or lone checkbox (e.g. "I agree to terms").
+        // Keep with its option-style label so the matcher still has signal,
+        // but expose the group-style label too so review tier can show both.
+        var only = members[0];
+        only.label = only._groupLabel || only.label || only._optionLabel || '';
+        only.optionLabel = only._optionLabel || '';
+        only.optionValue = only._optionValue || '';
+        delete only._groupLabel;
+        delete only._optionValue;
+        delete only._optionLabel;
+        standalone.push(only);
+        return;
+      }
+      var first = members[0];
+      grouped.push({
+        id: first.id,
+        domId: first.domId,
+        name: first.name,
+        tag: first.tag,
+        type: first.type,
+        inputType: first.type,
+        widget: first.widget === 'radio' ? 'radio-group' : 'checkbox-group',
+        autocomplete: '',
+        pattern: '',
+        maxLength: 0,
+        required: members.some(function(m) { return m.required; }),
+        role: first.role || '',
+        ariaHasPopup: '',
+        ariaControls: '',
+        label: first._groupLabel || first.label || '',
+        placeholder: '',
+        ariaLabel: '',
+        nearbyText: first.nearbyText || '',
+        contentEditable: false,
+        longform: false,
+        options: members.map(function(m) {
+          return { afId: m.id, value: m._optionValue || '', label: m._optionLabel || '' };
+        }),
+      });
+    });
+
+    unique = standalone.concat(grouped);
 
     // Stable fingerprint of the field set; suppress duplicate posts
     var fp = unique.map(function(f) {
