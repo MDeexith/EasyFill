@@ -733,7 +733,7 @@ export default function BrowserScreen({ route, navigation }) {
               <Text style={styles.fabText}>
                 {phase === 'filled'
                   ? ((fillStats.autoMatched + fillStats.aiMatched) > 0
-                      ? `Auto:${fillStats.autoMatched} · AI:${fillStats.aiMatched} · Regex:${fillStats.regexMatched}`
+                      ? `AI Auto:${fillStats.autoMatched + fillStats.aiMatched} · Regex:${fillStats.regexMatched}`
                       : 'Filled')
                   : phase === 'no-fields'
                     ? 'No fields · tap to rescan'

@@ -7,7 +7,11 @@ export const FORM_SCANNER_JS = `
   var SKIP_ROLE_RE = /^(navigation|menu|menubar|tablist|toolbar|banner|contentinfo)$/i;
   var INPUT_SELECTOR =
     'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=checkbox]):not([type=radio]):not([type=file]):not([aria-hidden="true"]),' +
-    'textarea, select, [contenteditable=""], [contenteditable="true"], [role="textbox"]';
+    'textarea, select, [contenteditable=""], [contenteditable="true"], [role="textbox"],' +
+    // Button-style and div-style dropdowns (Headless UI, Radix, Workday, etc.)
+    '[role="combobox"], [role="listbox"],' +
+    'button[aria-haspopup="listbox"], button[aria-haspopup="menu"], button[aria-haspopup="true"],' +
+    '[aria-haspopup="listbox"], [aria-haspopup="menu"]';
 
   // Stable counter so af_<n> ids never collide
   var afCounter = 0;
@@ -310,6 +314,48 @@ export const FORM_SCANNER_JS = `
     return '';
   }
 
+  // Classify the widget so the filler can route to the right strategy
+  // ('select', 'button-dropdown', 'combobox-input', 'contenteditable',
+  // 'textarea', 'text').
+  function classifyWidget(el, tag, contentEditable) {
+    if (contentEditable) return 'contenteditable';
+    if (tag === 'select') return 'select';
+    if (tag === 'textarea') return 'textarea';
+    var role = (el.getAttribute && el.getAttribute('role')) || '';
+    var hasPopup = (el.getAttribute && el.getAttribute('aria-haspopup')) || '';
+    if (tag === 'input') {
+      // <input role="combobox"> — React Select, Headless UI Combobox, etc.
+      if (role === 'combobox' || hasPopup === 'listbox' || hasPopup === 'menu') {
+        return 'combobox-input';
+      }
+      return 'text';
+    }
+    // Non-input dropdown: button / div with role/aria-haspopup signalling
+    // an opens-on-click options menu.
+    if (
+      tag === 'button' ||
+      role === 'combobox' || role === 'listbox' ||
+      hasPopup === 'listbox' || hasPopup === 'menu' || hasPopup === 'true'
+    ) {
+      return 'button-dropdown';
+    }
+    return 'text';
+  }
+
+  // For non-input dropdowns we don't want to surface every UI button on the
+  // page (hamburger menus, "More options", etc.) as a form field. Require at
+  // least one semantic identifier that ties the trigger to a form field.
+  function isLabeledDropdownTrigger(el, label, ariaLabel, name, nearbyText) {
+    if (label || ariaLabel || name) return true;
+    if (el.id) return true;
+    if (el.getAttribute && el.getAttribute('aria-labelledby')) return true;
+    // Inline text on the trigger itself only counts if it's short and not a
+    // generic action verb. Prevents picking up menu buttons.
+    var t = (nearbyText || '').trim();
+    if (t && t.length <= 60 && !/^(menu|more|options|filter|sort|share)$/i.test(t)) return true;
+    return false;
+  }
+
   function describeField(el) {
     var afId = el.getAttribute(AF_ATTR);
     if (!afId) {
@@ -322,14 +368,23 @@ export const FORM_SCANNER_JS = `
     var rawType = (el.getAttribute && el.getAttribute('type')) || '';
     var inputType = rawType ? rawType.toLowerCase() : tag;
     var contentEditable = isContentEditable(el);
+    var widget = classifyWidget(el, tag, contentEditable);
+
+    var label = preferredLabelFor(el);
+    var ariaLabel = (el.getAttribute && el.getAttribute('aria-label')) || '';
+    var name = (el.getAttribute && el.getAttribute('name')) || '';
+    var nearbyText = getNearbyText(el);
 
     return {
       id: afId,
       domId: el.id || '',
-      name: (el.getAttribute && el.getAttribute('name')) || '',
+      name: name,
       tag: tag,
       type: inputType,
       inputType: inputType,
+      // 'select' | 'button-dropdown' | 'combobox-input' | 'contenteditable' |
+      // 'textarea' | 'text' — used by the filler to pick a strategy.
+      widget: widget,
       autocomplete: (el.getAttribute && el.getAttribute('autocomplete')) || '',
       pattern: (el.getAttribute && el.getAttribute('pattern')) || '',
       maxLength: (el.maxLength && el.maxLength > 0) ? el.maxLength : 0,
@@ -337,12 +392,17 @@ export const FORM_SCANNER_JS = `
       role: (el.getAttribute && el.getAttribute('role')) || '',
       ariaHasPopup: (el.getAttribute && el.getAttribute('aria-haspopup')) || '',
       ariaControls: (el.getAttribute && el.getAttribute('aria-controls')) || '',
-      label: preferredLabelFor(el),
+      label: label,
       placeholder: (el.getAttribute && el.getAttribute('placeholder')) || '',
-      ariaLabel: (el.getAttribute && el.getAttribute('aria-label')) || '',
-      nearbyText: getNearbyText(el),
+      ariaLabel: ariaLabel,
+      nearbyText: nearbyText,
       contentEditable: contentEditable,
       longform: tag === 'textarea' || contentEditable,
+      // Used by scanForms() to filter unlabeled UI buttons that match the
+      // selector but aren't actually form fields.
+      _droppable: widget === 'button-dropdown'
+        ? isLabeledDropdownTrigger(el, label, ariaLabel, name, nearbyText)
+        : true,
     };
   }
 
@@ -362,14 +422,18 @@ export const FORM_SCANNER_JS = `
       }
     }
 
-    // Deduplicate by af-id (Shadow DOM + iframe walks can revisit nodes)
+    // Deduplicate by af-id (Shadow DOM + iframe walks can revisit nodes) and
+    // drop unlabeled button-dropdowns (UI buttons that match the selector but
+    // aren't actually form fields).
     var seen = {};
     var unique = [];
     for (var k = 0; k < fields.length; k++) {
-      if (!seen[fields[k].id]) {
-        seen[fields[k].id] = true;
-        unique.push(fields[k]);
-      }
+      var fld = fields[k];
+      if (seen[fld.id]) continue;
+      if (fld._droppable === false) continue;
+      seen[fld.id] = true;
+      delete fld._droppable;
+      unique.push(fld);
     }
 
     // Stable fingerprint of the field set; suppress duplicate posts

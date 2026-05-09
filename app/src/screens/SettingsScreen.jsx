@@ -33,6 +33,28 @@ export default function SettingsScreen({ navigation }) {
     });
   }, [navigation, show]);
 
+  const clearAutofillMemory = useCallback(() => {
+    show({
+      title: 'Clear autofill memory?',
+      message: 'Forgets the per-site field mappings learned from previous fills. The next visit to each site will re-match fields using AI.',
+      buttons: [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear',
+          style: 'destructive',
+          onPress: () => {
+            clearMappingCache();
+            show({
+              title: 'Cleared',
+              message: 'Autofill memory has been reset.',
+              buttons: [{ text: 'OK' }],
+            });
+          },
+        },
+      ],
+    });
+  }, [show]);
+
   const ITEMS = [
     {
       group: 'PROFILE',
@@ -81,6 +103,12 @@ export default function SettingsScreen({ navigation }) {
     {
       group: 'DANGER',
       items: [
+        {
+          icon: 'refresh',
+          label: 'Clear autofill memory',
+          sub: 'Forget per-site field mappings',
+          onPress: clearAutofillMemory,
+        },
         {
           icon: 'trash',
           label: 'Reset all data',

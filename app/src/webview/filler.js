@@ -137,6 +137,103 @@ function setSelectVal(el, value) {
   return false;
 }
 
+// Strip combining marks + leading non-alphanumerics (e.g. flag emoji,
+// arrows, leading spaces) so option text matching tolerates "🇮🇳 India" vs
+// "India".
+function cleanOptText(t) {
+  return (t || '')
+    .toString()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/^[^a-z0-9]+/, '')
+    .trim();
+}
+
+function isButtonDropdown(el) {
+  if (!el || !el.getAttribute || !el.tagName) return false;
+  var tag = el.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return false;
+  if (isContentEditable(el)) return false;
+  var role = el.getAttribute('role') || '';
+  var hasPopup = el.getAttribute('aria-haspopup') || '';
+  if (tag === 'BUTTON') return true;
+  if (role === 'combobox' || role === 'listbox') return true;
+  if (hasPopup === 'listbox' || hasPopup === 'menu' || hasPopup === 'true') return true;
+  return false;
+}
+
+// Wait until the dropdown's popup listbox/menu actually appears in the DOM,
+// then return it. Returns null on timeout.
+function waitForListbox(el, maxAttempts, intervalMs) {
+  return new Promise(function(resolve) {
+    var attempts = 0;
+    function poll() {
+      attempts++;
+      var ariaControls = el.getAttribute && el.getAttribute('aria-controls');
+      var listbox = null;
+      if (ariaControls) {
+        try { listbox = document.getElementById(ariaControls); } catch (e) {}
+      }
+      if (!listbox) {
+        listbox =
+          document.querySelector('[role="listbox"]:not([aria-hidden="true"])') ||
+          document.querySelector('[role="menu"]:not([aria-hidden="true"])') ||
+          document.querySelector('[data-radix-popper-content-wrapper] [role="listbox"], [data-radix-popper-content-wrapper] [role="menu"]') ||
+          document.querySelector('.MuiMenu-list, .MuiList-root, .ant-select-dropdown:not(.ant-select-dropdown-hidden), [class*="menu-list"], [class*="dropdown-menu"]:not([hidden])');
+      }
+      if (listbox) { resolve(listbox); return; }
+      if (attempts >= maxAttempts) { resolve(null); return; }
+      setTimeout(poll, intervalMs);
+    }
+    poll();
+  });
+}
+
+function tryButtonDropdownFill(el, value) {
+  return new Promise(function(resolve) {
+    try {
+      try { el.scrollIntoView({ block: 'center' }); } catch (e) {}
+      try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true })); } catch (e) {}
+      try { el.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true })); } catch (e) {}
+      try { el.click(); } catch (e) {}
+
+      waitForListbox(el, 12, 150).then(function(listbox) {
+        if (!listbox) { resolve(false); return; }
+
+        var options = listbox.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], li, button, a');
+        if (!options || options.length === 0) { resolve(false); return; }
+
+        var target = cleanOptText(value);
+        var best = null, bestScore = 0;
+        for (var i = 0; i < options.length; i++) {
+          var text = cleanOptText(options[i].innerText || options[i].textContent || '');
+          if (!text) continue;
+          var score = text === target ? 4
+                    : text.startsWith(target) ? 3
+                    : (target.length >= 2 && text.indexOf(target) !== -1) ? 2
+                    : 0;
+          if (score > bestScore) { bestScore = score; best = options[i]; }
+        }
+
+        if (!best) { resolve(false); return; }
+
+        try { best.scrollIntoView({ block: 'center' }); } catch (e) {}
+        try { best.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true })); } catch (e) {}
+        try { best.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true })); } catch (e) {}
+        try { best.click(); } catch (e) {}
+        // Some menus close only on a follow-up Enter on the trigger.
+        try {
+          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+        } catch (e) {}
+        resolve(true);
+      });
+    } catch (e) {
+      resolve(false);
+    }
+  });
+}
+
 function isPlacesLikeInput(el) {
   if (!el || !el.getAttribute) return false;
   if (el.getAttribute('role') !== 'combobox') return false;
@@ -303,13 +400,8 @@ function fillOne(el, value) {
   if (!el) return false;
   var strVal = String(value);
 
-  // Highlight on success regardless of strategy
-  function mark() {
-    try {
-      el.style.backgroundColor = '#ecfdf5';
-      el.style.border = '2px solid #10b981';
-    } catch (e) {}
-  }
+  // No-op kept so existing call sites stay untouched; visual highlight removed.
+  function mark() {}
 
   if (isContentEditable(el)) {
     setContentEditable(el, strVal);
@@ -321,6 +413,15 @@ function fillOne(el, value) {
     var ok = setSelectVal(el, strVal);
     if (ok) mark();
     return ok;
+  }
+
+  // Button / div-style dropdown (Headless UI Listbox, Radix, MUI Select,
+  // Greenhouse Country, Workday "Yes/No", etc.). Click to open, find a
+  // matching option in the popup, click it.
+  if (isButtonDropdown(el)) {
+    tryButtonDropdownFill(el, strVal).then(function(ok) { if (ok) mark(); });
+    mark();
+    return true;
   }
 
   // Google Places / geocoding-backed location comboboxes need char-by-char

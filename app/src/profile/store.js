@@ -200,6 +200,52 @@ export function clearMappingCache() {
   storage.remove(MAPPING_CACHE_KEY);
 }
 
+// Flattened, UI-friendly view of the per-host mapping cache. One entry per
+// (host, fingerprint) pair, with the fingerprint already split into its
+// constituent parts.
+export function listMappingCache() {
+  const cache = loadMappingCacheRaw();
+  const out = [];
+  for (const [host, entry] of Object.entries(cache)) {
+    if (!entry || !entry.mapping) continue;
+    for (const [fp, profileKey] of Object.entries(entry.mapping)) {
+      const [name = '', label = '', type = '', autocomplete = ''] = fp.split('|');
+      out.push({
+        host,
+        fingerprint: fp,
+        name,
+        label,
+        type,
+        autocomplete,
+        profileKey,
+        savedAt: entry.savedAt || 0,
+      });
+    }
+  }
+  out.sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+  return out;
+}
+
+export function deleteMappingCacheEntry(host, fingerprint) {
+  const cache = loadMappingCacheRaw();
+  const entry = cache[host];
+  if (!entry || !entry.mapping) return;
+  delete entry.mapping[fingerprint];
+  if (Object.keys(entry.mapping).length === 0) {
+    delete cache[host];
+  } else {
+    cache[host] = entry;
+  }
+  storage.set(MAPPING_CACHE_KEY, JSON.stringify(cache));
+}
+
+export function deleteMappingCacheHost(host) {
+  const cache = loadMappingCacheRaw();
+  if (!cache[host]) return;
+  delete cache[host];
+  storage.set(MAPPING_CACHE_KEY, JSON.stringify(cache));
+}
+
 // ─── Field corrections (autofill memory) ───────────────────────────
 // Stores fingerprint → direct value for fields autofill couldn't map.
 // Applied automatically on future fills before profile-based matching.
@@ -219,5 +265,20 @@ export function mergeFieldCorrections(entries) {
 
 export function clearFieldCorrections() {
   storage.remove(CORRECTIONS_KEY);
+}
+
+export function listFieldCorrections() {
+  const corrections = loadFieldCorrections();
+  return Object.entries(corrections).map(([fp, value]) => {
+    const [name = '', label = '', type = '', autocomplete = ''] = fp.split('|');
+    return { fingerprint: fp, name, label, type, autocomplete, value };
+  });
+}
+
+export function deleteFieldCorrection(fingerprint) {
+  const existing = loadFieldCorrections();
+  if (!(fingerprint in existing)) return;
+  delete existing[fingerprint];
+  storage.set(CORRECTIONS_KEY, JSON.stringify(existing));
 }
 

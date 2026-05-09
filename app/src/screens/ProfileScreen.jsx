@@ -8,13 +8,21 @@ import {
   KeyboardAvoidingView,
   Platform,
   TouchableOpacity,
-  Alert,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Btn, IconBtn, Card, Chip, Eyebrow, T } from '../components/ui';
+import { Btn, Chip, Eyebrow, T } from '../components/ui';
 import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
-import { loadProfile, saveProfile } from '../profile/store';
+import {
+  loadProfile,
+  saveProfile,
+  listMappingCache,
+  deleteMappingCacheEntry,
+  deleteMappingCacheHost,
+  listFieldCorrections,
+  deleteFieldCorrection,
+} from '../profile/store';
 import { PROFILE_FIELD_LABELS } from '../profile/schema';
 
 const SECTIONS = [
@@ -33,9 +41,39 @@ function getInitials(profile) {
   return 'EF';
 }
 
+function groupMappingsByHost(entries) {
+  const byHost = {};
+  for (const entry of entries) {
+    if (!byHost[entry.host]) byHost[entry.host] = [];
+    byHost[entry.host].push(entry);
+  }
+  return Object.entries(byHost).map(([host, items]) => ({ host, items }));
+}
+
+function fieldDisplayLabel(item) {
+  const raw = (item.label || item.name || '').trim();
+  if (raw) return raw.replace(/\s+\*\s*$/, '');
+  if (item.autocomplete) return item.autocomplete;
+  if (item.type) return item.type;
+  return '(unnamed field)';
+}
+
 export default function ProfileScreen() {
   const [profile, setProfile] = useState(() => loadProfile());
   const [saved, setSaved] = useState(false);
+  const [mappingGroups, setMappingGroups] = useState(() => groupMappingsByHost(listMappingCache()));
+  const [corrections, setCorrections] = useState(() => listFieldCorrections());
+
+  const refreshMemory = useCallback(() => {
+    setMappingGroups(groupMappingsByHost(listMappingCache()));
+    setCorrections(listFieldCorrections());
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      refreshMemory();
+    }, [refreshMemory])
+  );
 
   const update = useCallback((key, value) => {
     setProfile(prev => ({ ...prev, [key]: key === 'yearsExperience' ? Number(value) || 0 : value }));
@@ -47,6 +85,21 @@ export default function ProfileScreen() {
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
   }, [profile]);
+
+  const handleDeleteMapping = useCallback((host, fingerprint) => {
+    deleteMappingCacheEntry(host, fingerprint);
+    refreshMemory();
+  }, [refreshMemory]);
+
+  const handleForgetHost = useCallback((host) => {
+    deleteMappingCacheHost(host);
+    refreshMemory();
+  }, [refreshMemory]);
+
+  const handleDeleteCorrection = useCallback((fingerprint) => {
+    deleteFieldCorrection(fingerprint);
+    refreshMemory();
+  }, [refreshMemory]);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -113,6 +166,113 @@ export default function ProfileScreen() {
               </View>
             </View>
           ))}
+
+          <View style={{ paddingHorizontal: 16, marginTop: 24 }}>
+            <View style={styles.memHeader}>
+              <Eyebrow>AUTOFILL MEMORY</Eyebrow>
+              <Text style={styles.memHeaderCount}>
+                {mappingGroups.reduce((n, g) => n + g.items.length, 0) + corrections.length} saved
+              </Text>
+            </View>
+            <Text style={styles.memHelp}>
+              Field mappings remembered from previous fills. Delete any entry to force a fresh AI match next time.
+            </Text>
+
+            {mappingGroups.length === 0 && corrections.length === 0 ? (
+              <View style={[styles.card, styles.memEmpty]}>
+                <Icon name="sparkles" size={16} color={theme.colors.muted} />
+                <Text style={styles.memEmptyText}>
+                  No saved mappings yet. They'll appear here after your first autofill.
+                </Text>
+              </View>
+            ) : (
+              <>
+                {mappingGroups.map(group => (
+                  <View key={group.host} style={[styles.card, { marginBottom: 10 }]}>
+                    <View style={styles.memHostRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.memHostName} numberOfLines={1}>{group.host}</Text>
+                        <Text style={styles.memHostSub}>
+                          {group.items.length} field{group.items.length === 1 ? '' : 's'} mapped
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        onPress={() => handleForgetHost(group.host)}
+                        activeOpacity={0.7}
+                        style={styles.memHostForget}
+                      >
+                        <Text style={styles.memHostForgetText}>Forget all</Text>
+                      </TouchableOpacity>
+                    </View>
+                    {group.items.map((item, i) => (
+                      <View
+                        key={item.fingerprint}
+                        style={[
+                          styles.memRow,
+                          i === 0 && { borderTopWidth: 1, borderTopColor: theme.colors.border },
+                          i < group.items.length - 1 && { borderBottomWidth: 1, borderBottomColor: theme.colors.border },
+                        ]}
+                      >
+                        <View style={{ flex: 1, marginRight: 8 }}>
+                          <Text style={styles.memFieldLabel} numberOfLines={1}>
+                            {fieldDisplayLabel(item)}
+                          </Text>
+                          <View style={styles.memMapRow}>
+                            <Text style={styles.memArrow}>→</Text>
+                            <Chip tone="accent">
+                              {PROFILE_FIELD_LABELS[item.profileKey] || item.profileKey}
+                            </Chip>
+                          </View>
+                        </View>
+                        <TouchableOpacity
+                          onPress={() => handleDeleteMapping(group.host, item.fingerprint)}
+                          activeOpacity={0.6}
+                          hitSlop={8}
+                          style={styles.memDelBtn}
+                        >
+                          <Icon name="close" size={14} color={theme.colors.danger} strokeWidth={2.5} />
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </View>
+                ))}
+
+                {corrections.length > 0 && (
+                  <View style={{ marginTop: 14 }}>
+                    <Eyebrow style={{ marginBottom: 8 }}>SAVED ANSWERS</Eyebrow>
+                    <View style={styles.card}>
+                      {corrections.map((item, i) => (
+                        <View
+                          key={item.fingerprint}
+                          style={[
+                            styles.memRow,
+                            i < corrections.length - 1 && { borderBottomWidth: 1, borderBottomColor: theme.colors.border },
+                          ]}
+                        >
+                          <View style={{ flex: 1, marginRight: 8 }}>
+                            <Text style={styles.memFieldLabel} numberOfLines={1}>
+                              {fieldDisplayLabel(item)}
+                            </Text>
+                            <Text style={styles.memCorrectionValue} numberOfLines={2}>
+                              {item.value}
+                            </Text>
+                          </View>
+                          <TouchableOpacity
+                            onPress={() => handleDeleteCorrection(item.fingerprint)}
+                            activeOpacity={0.6}
+                            hitSlop={8}
+                            style={styles.memDelBtn}
+                          >
+                            <Icon name="close" size={14} color={theme.colors.danger} strokeWidth={2.5} />
+                          </TouchableOpacity>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                )}
+              </>
+            )}
+          </View>
         </ScrollView>
       </KeyboardAvoidingView>
 
@@ -210,5 +370,110 @@ const styles = StyleSheet.create({
     backgroundColor: theme.colors.bg,
     borderTopWidth: 1,
     borderTopColor: theme.colors.border,
+  },
+
+  memHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  memHeaderCount: {
+    fontSize: 11,
+    fontFamily: theme.font.mono,
+    color: theme.colors.muted,
+    letterSpacing: -0.3,
+  },
+  memHelp: {
+    fontSize: 12,
+    fontFamily: theme.font.sans,
+    color: theme.colors.muted,
+    lineHeight: 17,
+    marginBottom: 12,
+  },
+  memEmpty: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    padding: 16,
+  },
+  memEmptyText: {
+    flex: 1,
+    fontSize: 12.5,
+    fontFamily: theme.font.sans,
+    color: theme.colors.muted,
+    lineHeight: 18,
+  },
+  memHostRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 12,
+  },
+  memHostName: {
+    fontSize: 13,
+    fontFamily: theme.font.mono,
+    fontWeight: '700',
+    color: theme.colors.ink,
+    letterSpacing: -0.3,
+  },
+  memHostSub: {
+    fontSize: 11,
+    fontFamily: theme.font.sans,
+    color: theme.colors.muted,
+    marginTop: 2,
+  },
+  memHostForget: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: theme.colors.surface2,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+  },
+  memHostForgetText: {
+    fontSize: 11,
+    fontFamily: theme.font.sans,
+    fontWeight: '600',
+    color: theme.colors.danger,
+  },
+  memRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  memFieldLabel: {
+    fontSize: 13,
+    fontFamily: theme.font.sans,
+    fontWeight: '600',
+    color: theme.colors.ink,
+  },
+  memMapRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 5,
+  },
+  memArrow: {
+    fontSize: 12,
+    color: theme.colors.muted,
+    fontFamily: theme.font.mono,
+  },
+  memCorrectionValue: {
+    fontSize: 12,
+    fontFamily: theme.font.sans,
+    color: theme.colors.ink2,
+    marginTop: 3,
+    lineHeight: 16,
+  },
+  memDelBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    backgroundColor: '#fef2f2',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });

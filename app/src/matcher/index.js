@@ -94,27 +94,38 @@ function dedupe(decisions, fieldsById) {
 //   mapping[fieldId]   = profile key (or undefined if unmapped)
 //   decisions[fieldId] = { key, confidence, source } | null
 export async function matchFieldsToProfile(fields, profile, useLlmFallback = true, hostname = null) {
-  // Cache hit: skip regex + AI entirely for known sites
-  if (hostname) {
-    const cached = getCachedMapping(hostname, fields, profile);
-    if (cached) {
-      const decisions = {};
-      for (const [id, key] of Object.entries(cached)) {
-        decisions[id] = { key, confidence: 1.0, source: 'cache' };
-      }
-      return { mapping: { ...cached }, decisions };
-    }
+  // Look up any cached per-host mapping. Cache may cover only a subset of
+  // fields (page version drift, new questions added, etc.) — uncovered fields
+  // still need to flow through regex + AI, otherwise we'd silently leave them
+  // empty and never re-train the cache.
+  const cached = hostname ? (getCachedMapping(hostname, fields, profile) || {}) : {};
+  const cachedCount = Object.keys(cached).length;
+
+  // Fields that still need a fresh decision from regex / AI.
+  const uncoveredFields = fields.filter(f => !cached[f.id]);
+
+  if (cachedCount > 0) {
+    console.log(
+      '[matcher] cache hit for', hostname,
+      '— covered', cachedCount, '/', fields.length,
+      'fields; AI will run on the remaining', uncoveredFields.length,
+    );
   }
 
-  const { decisions: regexDecisions } = applyHeuristics(fields);
+  const { decisions: regexDecisions } = applyHeuristics(uncoveredFields);
 
   let aiDecisions = {};
-  if (useLlmFallback) {
+  if (useLlmFallback && uncoveredFields.length > 0) {
     try {
-      const raw = await llmMatch(fields, profile);
+      console.log('[matcher] calling AI /match for', uncoveredFields.length, 'field(s)');
+      const raw = await llmMatch(uncoveredFields, profile);
       aiDecisions = normaliseAi(raw);
-    } catch {
-      // AI unavailable — regex decisions used as-is
+      console.log('[matcher] AI /match returned', Object.keys(aiDecisions).length, 'decision(s)');
+    } catch (err) {
+      // AI unavailable — regex decisions used as-is. Surface the reason so
+      // "AI: 0" in the UI doesn't mask a backend connectivity problem.
+      const msg = err && err.message ? err.message : String(err);
+      console.warn('[matcher] AI /match call failed, falling back to regex only:', msg);
     }
   }
 
@@ -123,7 +134,11 @@ export async function matchFieldsToProfile(fields, profile, useLlmFallback = tru
 
   const decisions = {};
   for (const f of fields) {
-    decisions[f.id] = decideForField(f, regexDecisions[f.id] || null, aiDecisions[f.id] || null);
+    if (cached[f.id]) {
+      decisions[f.id] = { key: cached[f.id], confidence: 1.0, source: 'cache' };
+    } else {
+      decisions[f.id] = decideForField(f, regexDecisions[f.id] || null, aiDecisions[f.id] || null);
+    }
   }
 
   dedupe(decisions, fieldsById);
