@@ -1,4 +1,4 @@
-package com.app
+package easyfill.app
 
 import android.app.Application
 import com.facebook.react.PackageList

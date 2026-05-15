@@ -155,7 +155,7 @@ export default function JobFeedScreen({ navigation }) {
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [committedSearch, setCommittedSearch] = useState('');
   const [selectedSource, setSelectedSource] = useState('all');
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [locationFilter, setLocationFilter] = useState('');
@@ -164,12 +164,6 @@ export default function JobFeedScreen({ navigation }) {
   const [hasMore, setHasMore] = useState(true);
   const [totalCount, setTotalCount] = useState(0);
   const [error, setError] = useState(null);
-
-  // Debounce search
-  useEffect(() => {
-    const timer = setTimeout(() => setDebouncedSearch(search), 400);
-    return () => clearTimeout(timer);
-  }, [search]);
 
   const activeLocation = locationChip !== 'Any' ? locationChip : locationFilter.trim();
   const loadingRef = useRef(false);
@@ -189,7 +183,7 @@ export default function JobFeedScreen({ navigation }) {
       const loc = locationChip !== 'Any' ? locationChip : locationFilter.trim();
       const isRemote = locationChip === 'Remote';
       const result = await fetchJobFeed({
-        search: debouncedSearch,
+        search: committedSearch,
         category: selectedCategory,
         location: loc || undefined,
         page: pageNum,
@@ -221,12 +215,12 @@ export default function JobFeedScreen({ navigation }) {
     } finally {
       loadingRef.current = false;
     }
-  }, [debouncedSearch, selectedSource, selectedCategory, locationChip, locationFilter]);
+  }, [committedSearch, selectedSource, selectedCategory, locationChip, locationFilter]);
 
   // Initial load and on filter change
   useEffect(() => {
     loadJobs({ isRefresh: false });
-  }, [debouncedSearch, selectedSource, selectedCategory, locationChip, locationFilter]);
+  }, [committedSearch, selectedSource, selectedCategory, locationChip, locationFilter]);
 
   const handleRefresh = useCallback(() => {
     loadJobs({ isRefresh: true });
