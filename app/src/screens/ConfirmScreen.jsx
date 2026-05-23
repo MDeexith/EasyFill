@@ -35,7 +35,7 @@ export default function ConfirmScreen({ navigation }) {
           name="arrow-left"
           onPress={() => {
             if (navigation.canGoBack()) navigation.goBack();
-            else navigation.replace('Main');
+            else navigation.replace('Upload');
           }}
         />
         <View style={styles.progressRow}>

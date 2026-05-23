@@ -1,5 +1,5 @@
-import React, { useState, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from 'react-native';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Animated, BackHandler } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { pick, types, isErrorWithCode, errorCodes } from '@react-native-documents/picker';
 import { Btn, IconBtn, Card, Eyebrow, T } from '../components/ui';
@@ -13,6 +13,50 @@ export default function UploadScreen({ navigation }) {
   const [state, setState] = useState('idle'); // idle | uploading | parsing
   const [fileName, setFileName] = useState('');
   const { show, dialogProps } = useDialog();
+
+  const sparkleOpacity = useRef(new Animated.Value(1)).current;
+  const sparkleScale = useRef(new Animated.Value(1)).current;
+  const sparkleAnim = useRef(null);
+  const progressWidth = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (state === 'idle') return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      setState('idle');
+      return true; // consume event — no navigation
+    });
+    return () => sub.remove();
+  }, [state]);
+
+  useEffect(() => {
+    if (state === 'uploading') {
+      Animated.timing(progressWidth, { toValue: 55, duration: 600, useNativeDriver: false }).start();
+    } else if (state === 'parsing') {
+      Animated.timing(progressWidth, { toValue: 100, duration: 500, useNativeDriver: false }).start();
+      sparkleAnim.current = Animated.loop(
+        Animated.sequence([
+          Animated.parallel([
+            Animated.timing(sparkleOpacity, { toValue: 0.2, duration: 400, useNativeDriver: true }),
+            Animated.timing(sparkleScale, { toValue: 0.7, duration: 400, useNativeDriver: true }),
+          ]),
+          Animated.parallel([
+            Animated.timing(sparkleOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
+            Animated.timing(sparkleScale, { toValue: 1.25, duration: 300, useNativeDriver: true }),
+          ]),
+          Animated.parallel([
+            Animated.timing(sparkleOpacity, { toValue: 0.8, duration: 200, useNativeDriver: true }),
+            Animated.timing(sparkleScale, { toValue: 1, duration: 200, useNativeDriver: true }),
+          ]),
+        ])
+      );
+      sparkleAnim.current.start();
+    } else {
+      sparkleAnim.current?.stop();
+      sparkleOpacity.setValue(1);
+      sparkleScale.setValue(1);
+      if (state === 'idle') progressWidth.setValue(0);
+    }
+  }, [state]);
 
   const doPick = useCallback(async () => {
     let stateTimer = null;
@@ -48,8 +92,12 @@ export default function UploadScreen({ navigation }) {
         <IconBtn
           name="arrow-left"
           onPress={() => {
+            if (state !== 'idle') {
+              setState('idle');
+              return;
+            }
             if (navigation.canGoBack()) navigation.goBack();
-            else navigation.replace('Main');
+            else navigation.replace('Splash');
           }}
         />
         <View style={styles.progressRow}>
@@ -90,10 +138,14 @@ export default function UploadScreen({ navigation }) {
                     {state === 'uploading' ? 'Reading file…' : 'Parsing resume…'}
                   </Text>
                 </View>
-                {state === 'parsing' && <Icon name="sparkles" size={18} color={theme.colors.accent} />}
+                {state === 'parsing' && (
+                  <Animated.View style={{ opacity: sparkleOpacity, transform: [{ scale: sparkleScale }] }}>
+                    <Icon name="sparkles" size={18} color={theme.colors.accent} />
+                  </Animated.View>
+                )}
               </View>
               <View style={styles.progressTrack}>
-                <View style={[styles.progressFill, { width: state === 'parsing' ? '100%' : '55%' }]} />
+                <Animated.View style={[styles.progressFill, { width: progressWidth.interpolate({ inputRange: [0, 100], outputRange: ['0%', '100%'] }) }]} />
               </View>
               {state === 'parsing' && (
                 <View style={{ marginTop: 14, gap: 6 }}>
@@ -127,7 +179,7 @@ export default function UploadScreen({ navigation }) {
         <View style={styles.securityNote}>
           <Icon name="shield" size={18} color={theme.colors.ink} />
           <Text style={styles.securityText}>
-            Your resume is sent to your local backend only — nothing reaches external servers.
+            Your data stays on your device only — nothing is sent to external servers.
           </Text>
         </View>
       </ScrollView>

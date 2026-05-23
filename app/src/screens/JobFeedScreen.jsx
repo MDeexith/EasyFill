@@ -263,10 +263,10 @@ export default function JobFeedScreen({ navigation }) {
             autoCapitalize="none"
             autoCorrect={false}
             returnKeyType="search"
-            onSubmitEditing={() => Keyboard.dismiss()}
+            onSubmitEditing={() => { setCommittedSearch(search); Keyboard.dismiss(); }}
           />
           {search.length > 0 && (
-            <TouchableOpacity onPress={() => setSearch('')} activeOpacity={0.7}>
+            <TouchableOpacity onPress={() => { setSearch(''); setCommittedSearch(''); }} activeOpacity={0.7}>
               <Icon name="close" size={16} color={theme.colors.muted} />
             </TouchableOpacity>
           )}

@@ -8,7 +8,7 @@ import {
   StatusBar,
 } from 'react-native';
 import Svg, { Path, Circle } from 'react-native-svg';
-import { isOnboarded } from '../profile/store';
+import { isOnboarded, loadProfile } from '../profile/store';
 
 const { width: SW } = Dimensions.get('screen');
 
@@ -58,7 +58,9 @@ export default function LogoSplashScreen({ navigation }) {
         useNativeDriver: true,
       }),
     ]).start(() => {
-      navigation.replace(isOnboarded() ? 'Main' : 'Splash');
+      const onboarded = isOnboarded();
+      const profile = onboarded ? loadProfile() : null;
+      navigation.replace(onboarded && profile?.firstName ? 'Main' : 'Splash');
     });
   }, [navigation, opacity]);
 
