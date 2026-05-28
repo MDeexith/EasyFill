@@ -24,6 +24,7 @@ import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript }
 import { matchFieldsToProfile } from '../matcher';
 import { generateText } from '../api/backend';
 import { loadProfile, addHistoryEntry, loadFieldCorrections, mergeFieldCorrections } from '../profile/store';
+import { enrichProfile } from '../profile/enrich';
 
 function getHostname(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
@@ -94,16 +95,19 @@ function transformCareerUrl(rawUrl) {
   return null;
 }
 
-// Force all shadow roots open before page scripts run so our scanner can traverse them.
-// Workday Canvas uses closed shadow DOM by default — this override makes fields visible.
-const SHADOW_DOM_OPENER = `(function(){try{var o=Element.prototype.attachShadow;Element.prototype.attachShadow=function(i){return o.call(this,{mode:'open'});};}catch(e){}})();true;`;
+// Pre-page injection: force shadow roots open (Workday) + inject window.chrome stub
+// so Google's sign-in page doesn't block with "this browser may not be secure".
+const PRE_INJECT_JS = `(function(){
+  try{var o=Element.prototype.attachShadow;Element.prototype.attachShadow=function(i){return o.call(this,{mode:'open'});};}catch(e){}
+  try{if(!window.chrome){window.chrome={app:{isInstalled:false,InstallState:{DISABLED:'disabled',INSTALLED:'installed',NOT_INSTALLED:'not_installed'},RunningState:{CANNOT_RUN:'cannot_run',READY_TO_RUN:'ready_to_run',RUNNING:'running'}},runtime:{id:undefined}};}}catch(e){}
+})();true;`;
 
 // Desktop UA: job application forms (Greenhouse, Workday, Lever) render full
 // field sets only on desktop. Mobile UA triggers stripped views or app-store redirects.
 const WEBVIEW_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
   'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-  'Chrome/124.0.0.0 Safari/537.36';
+  'Chrome/136.0.0.0 Safari/537.36';
 
 
 export default function BrowserScreen({ route, navigation }) {
@@ -254,54 +258,6 @@ export default function BrowserScreen({ route, navigation }) {
     });
     return () => sub.remove();
   }, [webViewCanGoBack]);
-
-  function enrichProfile(raw) {
-    const p = { ...raw };
-    if (!p.firstName && !p.lastName && p.name) {
-      const parts = p.name.trim().split(/\s+/);
-      p.firstName = parts[0] || '';
-      p.lastName = parts.slice(1).join(' ') || '';
-    }
-    if (!p.name && (p.firstName || p.lastName)) {
-      p.name = [p.firstName, p.lastName].filter(Boolean).join(' ');
-    }
-
-    // Derive current title/company/yoe from experience[] when those keys are
-    // empty, so the matcher has more profile keys to satisfy.
-    const xp = Array.isArray(p.experience) ? p.experience : [];
-    if (xp.length > 0) {
-      const latest = xp[0] || {};
-      if (!p.currentTitle && latest.title) p.currentTitle = latest.title;
-      if (!p.currentCompany && latest.company) p.currentCompany = latest.company;
-      if (!p.yearsExperience || p.yearsExperience === 0) {
-        let totalMonths = 0;
-        for (const e of xp) {
-          const start = e.startDate ? new Date(e.startDate) : null;
-          const end = e.endDate ? new Date(e.endDate) : new Date();
-          if (start && !isNaN(start) && end && !isNaN(end) && end > start) {
-            totalMonths += (end - start) / (1000 * 60 * 60 * 24 * 30.44);
-          }
-        }
-        if (totalMonths > 0) p.yearsExperience = Math.round(totalMonths / 12);
-      }
-    }
-
-    // Back-compat: legacy `salary` resolves to expectedSalary if the latter
-    // is empty.
-    if (!p.expectedSalary && p.salary) p.expectedSalary = p.salary;
-
-    // Compose skills with any per-experience skills arrays.
-    const skillSet = new Set();
-    if (typeof p.skills === 'string' && p.skills.trim()) {
-      p.skills.split(',').map(s => s.trim()).filter(Boolean).forEach(s => skillSet.add(s));
-    }
-    for (const e of xp) {
-      if (Array.isArray(e.skills)) e.skills.forEach(s => s && skillSet.add(s));
-    }
-    if (skillSet.size > 0) p.skills = Array.from(skillSet).join(', ');
-
-    return p;
-  }
 
   const doAiDraft = useCallback(async (longs) => {
     if (!longs || longs.length === 0) return;
@@ -693,7 +649,7 @@ export default function BrowserScreen({ route, navigation }) {
           ref={webViewRef}
           source={webViewSource}
           style={{ flex: 1, backgroundColor: '#fff' }}
-          injectedJavaScriptBeforeContentLoaded={SHADOW_DOM_OPENER}
+          injectedJavaScriptBeforeContentLoaded={PRE_INJECT_JS}
           onLoadStart={() => {
             setLoading(true);
             setFields([]);

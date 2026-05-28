@@ -18,7 +18,8 @@ import Icon from '../components/Icon';
 import { Eyebrow } from '../components/ui';
 import { theme } from '../theme/tokens';
 import { fetchJobFeed } from '../api/jobsApi';
-import { saveFeedJobs, loadFeedJobs, getFeedAge } from '../profile/store';
+import { saveFeedJobs, loadFeedJobs, loadProfile } from '../profile/store';
+import { buildProfileSearchQuery } from '../jobs/profileFeed';
 
 const SOURCES = [
   { key: 'all', label: 'All Sources', icon: 'layers' },
@@ -151,8 +152,11 @@ function JobCard({ job, onPress }) {
 
 // ─── Main Screen ────────────────────────────────────────────────────
 export default function JobFeedScreen({ navigation }) {
-  const [jobs, setJobs] = useState(() => loadFeedJobs());
-  const [loading, setLoading] = useState(false);
+  const profileSearch = useRef(buildProfileSearchQuery(loadProfile())).current;
+  const filtersCustomized = useRef(false);
+  const [showProfileHint, setShowProfileHint] = useState(!!profileSearch);
+  const [jobs, setJobs] = useState(() => (profileSearch ? [] : loadFeedJobs()));
+  const [loading, setLoading] = useState(!!profileSearch);
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState('');
   const [committedSearch, setCommittedSearch] = useState('');
@@ -168,6 +172,13 @@ export default function JobFeedScreen({ navigation }) {
   const activeLocation = locationChip !== 'Any' ? locationChip : locationFilter.trim();
   const loadingRef = useRef(false);
 
+  const markFiltersCustomized = useCallback(() => {
+    if (!filtersCustomized.current) {
+      filtersCustomized.current = true;
+      setShowProfileHint(false);
+    }
+  }, []);
+
   const loadJobs = useCallback(async (opts = {}) => {
     const { isRefresh = false, isLoadMore = false, pageNum = 1 } = opts;
     if (loadingRef.current && !isRefresh) return;
@@ -182,8 +193,11 @@ export default function JobFeedScreen({ navigation }) {
       const sources = selectedSource === 'all' ? undefined : [selectedSource];
       const loc = locationChip !== 'Any' ? locationChip : locationFilter.trim();
       const isRemote = locationChip === 'Remote';
+      const effectiveSearch = filtersCustomized.current
+        ? committedSearch
+        : (profileSearch || committedSearch);
       const result = await fetchJobFeed({
-        search: committedSearch,
+        search: effectiveSearch || undefined,
         category: selectedCategory,
         location: loc || undefined,
         page: pageNum,
@@ -215,7 +229,7 @@ export default function JobFeedScreen({ navigation }) {
     } finally {
       loadingRef.current = false;
     }
-  }, [committedSearch, selectedSource, selectedCategory, locationChip, locationFilter]);
+  }, [committedSearch, selectedSource, selectedCategory, locationChip, locationFilter, profileSearch]);
 
   // Initial load and on filter change
   useEffect(() => {
@@ -263,14 +277,25 @@ export default function JobFeedScreen({ navigation }) {
             autoCapitalize="none"
             autoCorrect={false}
             returnKeyType="search"
-            onSubmitEditing={() => { setCommittedSearch(search); Keyboard.dismiss(); }}
+            onSubmitEditing={() => {
+              markFiltersCustomized();
+              setCommittedSearch(search);
+              Keyboard.dismiss();
+            }}
           />
           {search.length > 0 && (
-            <TouchableOpacity onPress={() => { setSearch(''); setCommittedSearch(''); }} activeOpacity={0.7}>
+            <TouchableOpacity onPress={() => {
+              markFiltersCustomized();
+              setSearch('');
+              setCommittedSearch('');
+            }} activeOpacity={0.7}>
               <Icon name="close" size={16} color={theme.colors.muted} />
             </TouchableOpacity>
           )}
         </View>
+        {showProfileHint && (
+          <Text style={styles.profileHint}>Based on your profile</Text>
+        )}
       </View>
 
       {/* Location filter */}
@@ -282,14 +307,21 @@ export default function JobFeedScreen({ navigation }) {
             placeholder="Location…"
             placeholderTextColor={theme.colors.faint}
             value={locationFilter}
-            onChangeText={v => { setLocationFilter(v); setLocationChip('Any'); }}
+            onChangeText={v => {
+              if (v.trim()) markFiltersCustomized();
+              setLocationFilter(v);
+              setLocationChip('Any');
+            }}
             autoCapitalize="words"
             autoCorrect={false}
             returnKeyType="search"
             onSubmitEditing={() => Keyboard.dismiss()}
           />
           {locationFilter.length > 0 && (
-            <TouchableOpacity onPress={() => setLocationFilter('')} activeOpacity={0.7}>
+            <TouchableOpacity onPress={() => {
+              markFiltersCustomized();
+              setLocationFilter('');
+            }} activeOpacity={0.7}>
               <Icon name="close" size={14} color={theme.colors.muted} />
             </TouchableOpacity>
           )}
@@ -300,7 +332,11 @@ export default function JobFeedScreen({ navigation }) {
             return (
               <TouchableOpacity
                 key={chip}
-                onPress={() => { setLocationChip(chip); setLocationFilter(''); }}
+                onPress={() => {
+                  if (chip !== 'Any') markFiltersCustomized();
+                  setLocationChip(chip);
+                  setLocationFilter('');
+                }}
                 activeOpacity={0.7}
                 style={[styles.locChip, isActive && styles.locChipActive]}
               >
@@ -325,7 +361,10 @@ export default function JobFeedScreen({ navigation }) {
           return (
             <TouchableOpacity
               key={src.key}
-              onPress={() => setSelectedSource(src.key)}
+              onPress={() => {
+                if (src.key !== 'all') markFiltersCustomized();
+                setSelectedSource(src.key);
+              }}
               activeOpacity={0.7}
               style={[
                 styles.sourcePill,
@@ -360,7 +399,10 @@ export default function JobFeedScreen({ navigation }) {
           return (
             <TouchableOpacity
               key={cat}
-              onPress={() => setSelectedCategory(cat)}
+              onPress={() => {
+                if (cat !== 'All') markFiltersCustomized();
+                setSelectedCategory(cat);
+              }}
               activeOpacity={0.7}
               style={[styles.catPill, isActive && styles.catPillActive]}
             >
@@ -515,6 +557,11 @@ const styles = StyleSheet.create({
 
   // Search
   searchWrap: { paddingHorizontal: 16, paddingTop: 4, paddingBottom: 6 },
+  profileHint: {
+    marginTop: 6,
+    fontSize: theme.type.sm,
+    color: theme.colors.muted,
+  },
   searchBar: {
     height: 44,
     borderRadius: 12,

@@ -17,6 +17,7 @@ import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
 import { loadProfile, loadFeedJobs, saveFeedJobs } from '../profile/store';
 import { fetchJobFeed } from '../api/jobsApi';
+import { buildProfileSearchQuery } from '../jobs/profileFeed';
 
 function getInitials(profile) {
   const first = (profile.firstName || profile.name || '').trim();
@@ -103,13 +104,15 @@ function filterLatestJobs(jobs) {
 export default function HomeScreen({ navigation }) {
   const [url, setUrl] = useState('');
   const [profile, setProfile] = useState(() => loadProfile());
+  const profileSearch = useMemo(() => buildProfileSearchQuery(profile), [profile]);
   const [latestJobs, setLatestJobs] = useState(() => filterLatestJobs(loadFeedJobs()).slice(0, 6));
   const [loadingLatest, setLoadingLatest] = useState(false);
   const { show, dialogProps } = useDialog();
 
   useFocusEffect(
     useCallback(() => {
-      setProfile(loadProfile());
+      const nextProfile = loadProfile();
+      setProfile(nextProfile);
       const cached = loadFeedJobs();
       if (cached.length > 0) {
         setLatestJobs(filterLatestJobs(cached).slice(0, 6));
@@ -123,7 +126,8 @@ export default function HomeScreen({ navigation }) {
     async function fetchPreview() {
       setLoadingLatest(true);
       try {
-        const result = await fetchJobFeed({ page: 1 });
+        const search = buildProfileSearchQuery(loadProfile());
+        const result = await fetchJobFeed({ search: search || undefined, page: 1 });
         if (!cancelled && result.jobs?.length > 0) {
           setLatestJobs(filterLatestJobs(result.jobs).slice(0, 6));
           saveFeedJobs(result.jobs);
@@ -226,7 +230,7 @@ export default function HomeScreen({ navigation }) {
         {/* Latest Jobs Section */}
         <View style={styles.trendingHeader}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <Eyebrow>LATEST JOBS</Eyebrow>
+            <Eyebrow>{profileSearch ? 'FOR YOU' : 'LATEST JOBS'}</Eyebrow>
             {loadingLatest && (
               <ActivityIndicator size="small" color={theme.colors.accent} />
             )}
