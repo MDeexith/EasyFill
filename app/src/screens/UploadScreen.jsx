@@ -10,13 +10,14 @@ import { parseResume } from '../api/backend';
 import { loadProfile, saveProfile } from '../profile/store';
 
 export default function UploadScreen({ navigation }) {
-  const [state, setState] = useState('idle'); // idle | uploading | parsing
+  const [state, setState] = useState('idle'); // idle | uploading | parsing | done
   const [fileName, setFileName] = useState('');
   const { show, dialogProps } = useDialog();
 
   const sparkleOpacity = useRef(new Animated.Value(1)).current;
   const sparkleScale = useRef(new Animated.Value(1)).current;
   const sparkleAnim = useRef(null);
+  const parsingAnim = useRef(null);
   const progressWidth = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -30,9 +31,10 @@ export default function UploadScreen({ navigation }) {
 
   useEffect(() => {
     if (state === 'uploading') {
-      Animated.timing(progressWidth, { toValue: 55, duration: 600, useNativeDriver: false }).start();
+      Animated.timing(progressWidth, { toValue: 35, duration: 600, useNativeDriver: false }).start();
     } else if (state === 'parsing') {
-      Animated.timing(progressWidth, { toValue: 100, duration: 500, useNativeDriver: false }).start();
+      parsingAnim.current = Animated.timing(progressWidth, { toValue: 85, duration: 40000, useNativeDriver: false });
+      parsingAnim.current.start();
       sparkleAnim.current = Animated.loop(
         Animated.sequence([
           Animated.parallel([
@@ -50,7 +52,14 @@ export default function UploadScreen({ navigation }) {
         ])
       );
       sparkleAnim.current.start();
+    } else if (state === 'done') {
+      parsingAnim.current?.stop();
+      sparkleAnim.current?.stop();
+      sparkleOpacity.setValue(1);
+      sparkleScale.setValue(1);
+      Animated.timing(progressWidth, { toValue: 100, duration: 400, useNativeDriver: false }).start();
     } else {
+      parsingAnim.current?.stop();
       sparkleAnim.current?.stop();
       sparkleOpacity.setValue(1);
       sparkleScale.setValue(1);
@@ -59,20 +68,17 @@ export default function UploadScreen({ navigation }) {
   }, [state]);
 
   const doPick = useCallback(async () => {
-    let stateTimer = null;
     try {
       const [result] = await pick({ type: [types.pdf] });
       setFileName(result.name ?? 'resume.pdf');
       setState('uploading');
-      stateTimer = setTimeout(() => setState('parsing'), 800);
-      const profile = await parseResume(result.uri, result.name ?? 'resume.pdf');
-      clearTimeout(stateTimer);
       setState('parsing');
+      const profile = await parseResume(result.uri, result.name ?? 'resume.pdf');
       const existing = loadProfile();
       saveProfile({ ...existing, ...profile });
-      setTimeout(() => navigation.replace('Confirm'), 1200);
+      setState('done');
+      setTimeout(() => navigation.replace('Confirm'), 600);
     } catch (err) {
-      if (stateTimer) clearTimeout(stateTimer);
       if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) {
         setState('idle');
         return;
@@ -126,7 +132,7 @@ export default function UploadScreen({ navigation }) {
             </TouchableOpacity>
           )}
 
-          {(state === 'uploading' || state === 'parsing') && (
+          {(state === 'uploading' || state === 'parsing' || state === 'done') && (
             <Card pad={18}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 }}>
                 <View style={styles.fileIcon}>
@@ -135,7 +141,7 @@ export default function UploadScreen({ navigation }) {
                 <View style={{ flex: 1 }}>
                   <Text style={styles.fileName} numberOfLines={1}>{fileName}</Text>
                   <Text style={[T.mono, { marginTop: 2 }]}>
-                    {state === 'uploading' ? 'Reading file…' : 'Parsing resume…'}
+                    {state === 'uploading' ? 'Reading file…' : state === 'done' ? 'Profile extracted' : 'Parsing resume…'}
                   </Text>
                 </View>
                 {state === 'parsing' && (
@@ -147,7 +153,7 @@ export default function UploadScreen({ navigation }) {
               <View style={styles.progressTrack}>
                 <Animated.View style={[styles.progressFill, { width: progressWidth.interpolate({ inputRange: [0, 100], outputRange: ['0%', '100%'] }) }]} />
               </View>
-              {state === 'parsing' && (
+              {state === 'done' && (
                 <View style={{ marginTop: 14, gap: 6 }}>
                   {['Contact details', 'Work experience', 'Education', 'Skills'].map(s => (
                     <View key={s} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
