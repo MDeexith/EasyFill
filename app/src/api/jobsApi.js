@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { getBackendUrl } from './backend';
+import { buildProfileSearchAttempts } from '../jobs/profileFeed';
 
 /**
  * Fetch job listings from the backend aggregation API.
@@ -23,6 +24,26 @@ export async function fetchJobFeed({ search, category, location, page = 1, sourc
     timeout: 30000,
   });
   return res.data;
+}
+
+/**
+ * Fetch jobs using profile currentTitle with shortened-title retries, then generic feed.
+ * @param {Object} rawProfile - User profile from MMKV
+ * @param {Object} [feedOpts] - Same options as fetchJobFeed (page, category, location, etc.)
+ * @returns {Promise<{ result: object, searchUsed: string|null, fromProfile: boolean }>}
+ */
+export async function fetchJobFeedForProfile(rawProfile, feedOpts = {}) {
+  const attempts = buildProfileSearchAttempts(rawProfile);
+
+  for (const query of attempts) {
+    const result = await fetchJobFeed({ ...feedOpts, search: query });
+    if (result.total > 0) {
+      return { result, searchUsed: query, fromProfile: true };
+    }
+  }
+
+  const result = await fetchJobFeed(feedOpts);
+  return { result, searchUsed: null, fromProfile: false };
 }
 
 /**

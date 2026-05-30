@@ -14,10 +14,11 @@ import {
   unstable_batchedUpdates,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import Icon from '../components/Icon';
 import { Eyebrow } from '../components/ui';
 import { theme } from '../theme/tokens';
-import { fetchJobFeed } from '../api/jobsApi';
+import { fetchJobFeed, fetchJobFeedForProfile } from '../api/jobsApi';
 import { saveFeedJobs, loadFeedJobs, loadProfile } from '../profile/store';
 import { buildProfileSearchQuery } from '../jobs/profileFeed';
 
@@ -152,7 +153,9 @@ function JobCard({ job, onPress }) {
 
 // ─── Main Screen ────────────────────────────────────────────────────
 export default function JobFeedScreen({ navigation }) {
-  const profileSearch = useRef(buildProfileSearchQuery(loadProfile())).current;
+  const [profile, setProfile] = useState(() => loadProfile());
+  const profileSearch = useMemo(() => buildProfileSearchQuery(profile), [profile]);
+  const profileSearchUsedRef = useRef(null);
   const filtersCustomized = useRef(false);
   const [showProfileHint, setShowProfileHint] = useState(!!profileSearch);
   const [jobs, setJobs] = useState(() => (profileSearch ? [] : loadFeedJobs()));
@@ -171,6 +174,12 @@ export default function JobFeedScreen({ navigation }) {
 
   const activeLocation = locationChip !== 'Any' ? locationChip : locationFilter.trim();
   const loadingRef = useRef(false);
+
+  useFocusEffect(
+    useCallback(() => {
+      setProfile(loadProfile());
+    }, [])
+  );
 
   const markFiltersCustomized = useCallback(() => {
     if (!filtersCustomized.current) {
@@ -193,17 +202,36 @@ export default function JobFeedScreen({ navigation }) {
       const sources = selectedSource === 'all' ? undefined : [selectedSource];
       const loc = locationChip !== 'Any' ? locationChip : locationFilter.trim();
       const isRemote = locationChip === 'Remote';
-      const effectiveSearch = filtersCustomized.current
-        ? committedSearch
-        : (profileSearch || committedSearch);
-      const result = await fetchJobFeed({
-        search: effectiveSearch || undefined,
+      const feedOpts = {
         category: selectedCategory,
         location: loc || undefined,
         page: pageNum,
         sources,
         isRemote,
-      });
+      };
+
+      let result;
+      if (filtersCustomized.current) {
+        result = await fetchJobFeed({
+          ...feedOpts,
+          search: committedSearch || undefined,
+        });
+      } else if (isLoadMore && profileSearchUsedRef.current) {
+        result = await fetchJobFeed({
+          ...feedOpts,
+          search: profileSearchUsedRef.current,
+        });
+      } else if (profileSearch) {
+        const { result: feedResult, searchUsed, fromProfile } =
+          await fetchJobFeedForProfile(profile, feedOpts);
+        result = feedResult;
+        profileSearchUsedRef.current = searchUsed;
+        if (!isLoadMore) setShowProfileHint(fromProfile);
+      } else {
+        result = await fetchJobFeed(feedOpts);
+        profileSearchUsedRef.current = null;
+        if (!isLoadMore) setShowProfileHint(false);
+      }
 
       const newJobs = result.jobs || [];
       unstable_batchedUpdates(() => {
@@ -229,12 +257,12 @@ export default function JobFeedScreen({ navigation }) {
     } finally {
       loadingRef.current = false;
     }
-  }, [committedSearch, selectedSource, selectedCategory, locationChip, locationFilter, profileSearch]);
+  }, [committedSearch, selectedSource, selectedCategory, locationChip, locationFilter, profileSearch, profile]);
 
   // Initial load and on filter change
   useEffect(() => {
     loadJobs({ isRefresh: false });
-  }, [committedSearch, selectedSource, selectedCategory, locationChip, locationFilter]);
+  }, [committedSearch, selectedSource, selectedCategory, locationChip, locationFilter, profileSearch]);
 
   const handleRefresh = useCallback(() => {
     loadJobs({ isRefresh: true });

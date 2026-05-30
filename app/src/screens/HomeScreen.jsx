@@ -16,7 +16,7 @@ import AppDialog, { useDialog } from '../components/AppDialog';
 import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
 import { loadProfile, loadFeedJobs, saveFeedJobs } from '../profile/store';
-import { fetchJobFeed } from '../api/jobsApi';
+import { fetchJobFeedForProfile } from '../api/jobsApi';
 import { buildProfileSearchQuery } from '../jobs/profileFeed';
 
 function getInitials(profile) {
@@ -120,14 +120,13 @@ export default function HomeScreen({ navigation }) {
     }, [])
   );
 
-  // Fetch a preview of jobs on mount
+  // Fetch a preview of jobs from profile title (with retries) or generic feed
   useEffect(() => {
     let cancelled = false;
     async function fetchPreview() {
       setLoadingLatest(true);
       try {
-        const search = buildProfileSearchQuery(loadProfile());
-        const result = await fetchJobFeed({ search: search || undefined, page: 1 });
+        const { result } = await fetchJobFeedForProfile(profile, { page: 1 });
         if (!cancelled && result.jobs?.length > 0) {
           setLatestJobs(filterLatestJobs(result.jobs).slice(0, 6));
           saveFeedJobs(result.jobs);
@@ -140,7 +139,7 @@ export default function HomeScreen({ navigation }) {
     }
     fetchPreview();
     return () => { cancelled = true; };
-  }, []);
+  }, [profile]);
 
   const handleOpen = useCallback(() => {
     const trimmed = url.trim();
