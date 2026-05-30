@@ -156,6 +156,7 @@ export default function JobFeedScreen({ navigation }) {
   const [profile, setProfile] = useState(() => loadProfile());
   const profileSearch = useMemo(() => buildProfileSearchQuery(profile), [profile]);
   const profileSearchUsedRef = useRef(null);
+  const fetchGenerationRef = useRef(0);
   const filtersCustomized = useRef(false);
   const [showProfileHint, setShowProfileHint] = useState(!!profileSearch);
   const [jobs, setJobs] = useState(() => (profileSearch ? [] : loadFeedJobs()));
@@ -189,8 +190,9 @@ export default function JobFeedScreen({ navigation }) {
   }, []);
 
   const loadJobs = useCallback(async (opts = {}) => {
-    const { isRefresh = false, isLoadMore = false, pageNum = 1 } = opts;
-    if (loadingRef.current && !isRefresh) return;
+    const { isRefresh = false, isLoadMore = false, pageNum = 1, generation } = opts;
+    const gen = generation ?? fetchGenerationRef.current;
+    if (loadingRef.current && !isRefresh && isLoadMore) return;
 
     loadingRef.current = true;
     unstable_batchedUpdates(() => {
@@ -233,6 +235,8 @@ export default function JobFeedScreen({ navigation }) {
         if (!isLoadMore) setShowProfileHint(false);
       }
 
+      if (gen !== fetchGenerationRef.current) return;
+
       const newJobs = result.jobs || [];
       unstable_batchedUpdates(() => {
         if (isLoadMore) {
@@ -249,23 +253,27 @@ export default function JobFeedScreen({ navigation }) {
         setRefreshing(false);
       });
     } catch (e) {
+      if (gen !== fetchGenerationRef.current) return;
       unstable_batchedUpdates(() => {
         setError('Failed to load jobs. Check your connection.');
         setLoading(false);
         setRefreshing(false);
       });
     } finally {
-      loadingRef.current = false;
+      if (gen === fetchGenerationRef.current) loadingRef.current = false;
     }
   }, [committedSearch, selectedSource, selectedCategory, locationChip, locationFilter, profileSearch, profile]);
 
   // Initial load and on filter change
   useEffect(() => {
-    loadJobs({ isRefresh: false });
-  }, [committedSearch, selectedSource, selectedCategory, locationChip, locationFilter, profileSearch]);
+    fetchGenerationRef.current += 1;
+    const gen = fetchGenerationRef.current;
+    loadingRef.current = false;
+    loadJobs({ isRefresh: false, generation: gen });
+  }, [committedSearch, selectedSource, selectedCategory, locationChip, locationFilter, profileSearch, loadJobs]);
 
   const handleRefresh = useCallback(() => {
-    loadJobs({ isRefresh: true });
+    loadJobs({ isRefresh: true, generation: fetchGenerationRef.current });
   }, [loadJobs]);
 
   const handleLoadMore = useCallback(() => {
@@ -274,14 +282,18 @@ export default function JobFeedScreen({ navigation }) {
   }, [hasMore, loading, page, loadJobs]);
 
   const filteredJobs = useMemo(() => {
+    let list = jobs;
+    if (selectedSource !== 'all') {
+      list = list.filter(j => j.source === selectedSource);
+    }
     const loc = activeLocation.toLowerCase();
-    if (!loc) return jobs;
-    return jobs.filter(j => {
+    if (!loc) return list;
+    return list.filter(j => {
       const jloc = (j.location || '').toLowerCase();
       if (loc === 'remote') return jloc.includes('remote') || jloc === '';
       return jloc.includes(loc);
     });
-  }, [jobs, activeLocation]);
+  }, [jobs, activeLocation, selectedSource]);
 
   const renderJobCard = useCallback(({ item }) => (
     <JobCard
@@ -336,7 +348,6 @@ export default function JobFeedScreen({ navigation }) {
             placeholderTextColor={theme.colors.faint}
             value={locationFilter}
             onChangeText={v => {
-              if (v.trim()) markFiltersCustomized();
               setLocationFilter(v);
               setLocationChip('Any');
             }}
@@ -346,10 +357,7 @@ export default function JobFeedScreen({ navigation }) {
             onSubmitEditing={() => Keyboard.dismiss()}
           />
           {locationFilter.length > 0 && (
-            <TouchableOpacity onPress={() => {
-              markFiltersCustomized();
-              setLocationFilter('');
-            }} activeOpacity={0.7}>
+            <TouchableOpacity onPress={() => setLocationFilter('')} activeOpacity={0.7}>
               <Icon name="close" size={14} color={theme.colors.muted} />
             </TouchableOpacity>
           )}
@@ -361,7 +369,6 @@ export default function JobFeedScreen({ navigation }) {
               <TouchableOpacity
                 key={chip}
                 onPress={() => {
-                  if (chip !== 'Any') markFiltersCustomized();
                   setLocationChip(chip);
                   setLocationFilter('');
                 }}
@@ -389,10 +396,7 @@ export default function JobFeedScreen({ navigation }) {
           return (
             <TouchableOpacity
               key={src.key}
-              onPress={() => {
-                if (src.key !== 'all') markFiltersCustomized();
-                setSelectedSource(src.key);
-              }}
+              onPress={() => setSelectedSource(src.key)}
               activeOpacity={0.7}
               style={[
                 styles.sourcePill,
@@ -427,10 +431,7 @@ export default function JobFeedScreen({ navigation }) {
           return (
             <TouchableOpacity
               key={cat}
-              onPress={() => {
-                if (cat !== 'All') markFiltersCustomized();
-                setSelectedCategory(cat);
-              }}
+              onPress={() => setSelectedCategory(cat)}
               activeOpacity={0.7}
               style={[styles.catPill, isActive && styles.catPillActive]}
             >
