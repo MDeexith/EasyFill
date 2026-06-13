@@ -22,6 +22,7 @@ import { FORM_SCANNER_JS } from '../webview/formScanner';
 
 import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript } from '../webview/filler';
 import { matchFieldsToProfile } from '../matcher';
+import { resolveLocally, resolveWithAi } from '../matcher/optionResolver';
 import { generateText } from '../api/backend';
 import { loadProfile, addHistoryEntry, loadFieldCorrections, mergeFieldCorrections } from '../profile/store';
 import { enrichProfile } from '../profile/enrich';
@@ -322,8 +323,13 @@ export default function BrowserScreen({ route, navigation }) {
       const { mapping: fastMapping, decisions: fastDecisions } =
         await matchFieldsToProfile(scanned, profile, false, host);
 
+      // Resolve dropdown options locally (no AI) so the fast pass fills the
+      // correct option (e.g. profile "USA" -> option "United States").
+      const { selections: localSelections, unresolved: fastDropdownsForAi } =
+        resolveLocally(scanned, fastMapping, profile);
+
       webViewRef.current?.injectJavaScript(
-        buildFillScript(fastMapping, JSON.stringify(profile), scanned)
+        buildFillScript(fastMapping, JSON.stringify(profile), scanned, localSelections)
       );
 
       let autoMatched = 0, regexMatched = 0;
@@ -341,20 +347,26 @@ export default function BrowserScreen({ route, navigation }) {
       const uncovered = scanned.filter(f => !fastMapping[f.id]);
       const fastKeys = new Set(Object.values(fastMapping));
 
+      let safeAiMapping = {};
+      let aiDropdownsForAi = [];
+
       if (uncovered.length > 0) {
         try {
           const { mapping: aiMapping, decisions: aiDecisions } =
             await matchFieldsToProfile(uncovered, profile, true, null);
 
           // Cross-pass dedup: skip keys already owned by fast pass
-          const safeAiMapping = {};
           for (const [id, key] of Object.entries(aiMapping)) {
             if (!fastKeys.has(key)) safeAiMapping[id] = key;
           }
 
           if (Object.keys(safeAiMapping).length > 0) {
+            // Resolve dropdown options locally for AI-mapped fields too.
+            const { selections: aiLocalSelections, unresolved } =
+              resolveLocally(uncovered, safeAiMapping, profile);
+            aiDropdownsForAi = unresolved;
             webViewRef.current?.injectJavaScript(
-              buildFillScript(safeAiMapping, JSON.stringify(profile), uncovered)
+              buildFillScript(safeAiMapping, JSON.stringify(profile), uncovered, aiLocalSelections)
             );
           }
 
@@ -366,6 +378,22 @@ export default function BrowserScreen({ route, navigation }) {
           setFillStats(prev => ({ ...prev, aiMatched }));
         } catch { /* AI failed — fast fill stands */ }
       }
+
+      // ── Dropdown option AI resolution ───────────────────────────────────
+      // For dropdowns whose option couldn't be matched locally, ask the LLM to
+      // pick the best option (e.g. "USA" -> "United States", "4" -> "3-5 years")
+      // and inject a dropdown-only fill. Runs in the background after the fast
+      // pass, mirroring the AI key-matching pass.
+      try {
+        const dropdownsForAi = fastDropdownsForAi.concat(aiDropdownsForAi);
+        if (dropdownsForAi.length > 0) {
+          const combinedMapping = { ...fastMapping, ...safeAiMapping };
+          const aiSelections = await resolveWithAi(dropdownsForAi, combinedMapping, profile);
+          if (Object.keys(aiSelections).length > 0) {
+            webViewRef.current?.injectJavaScript(buildDirectFillScript(aiSelections));
+          }
+        }
+      } catch { /* dropdown AI resolution failed — local selections stand */ }
 
       // Apply saved corrections for fields the profile didn't cover
       const corrections = loadFieldCorrections();

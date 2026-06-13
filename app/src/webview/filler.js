@@ -561,7 +561,7 @@ function buildGroupMeta(fields) {
   return meta;
 }
 
-export function buildFillScript(mapping, profileJson, fields) {
+export function buildFillScript(mapping, profileJson, fields, optionSelections = {}) {
   // profileJson is already a JSON string (existing callers pass JSON.stringify(profile)).
   // Re-encode through safeJson to neutralise any embedded "</script>" sequence.
   const safeProfile = safeJson(JSON.parse(profileJson));
@@ -571,6 +571,7 @@ export function buildFillScript(mapping, profileJson, fields) {
   var profile = ${safeProfile};
   var mapping = ${safeJson(mapping)};
   var groupMeta = ${safeJson(groupMeta)};
+  var optionSelections = ${safeJson(optionSelections || {})};
   ${FILLER_RUNTIME}
 
   // Profile keys whose value is a comma-separated list and which should be
@@ -586,6 +587,12 @@ export function buildFillScript(mapping, profileJson, fields) {
     var val = profile[profileKey];
     if ((val === undefined || val === null || val === '') && profileKey === 'expectedSalary') {
       val = profile.salary;
+    }
+    // Dropdown option override: use the resolved option text (e.g. "United
+    // States") instead of the raw profile value (e.g. "USA"). fillOne still
+    // routes <select> -> setSelectVal and custom dropdowns -> the popup matcher.
+    if (optionSelections[fieldId] !== undefined && optionSelections[fieldId] !== null && optionSelections[fieldId] !== '') {
+      val = optionSelections[fieldId];
     }
     if (val === undefined || val === null || val === '') return;
 

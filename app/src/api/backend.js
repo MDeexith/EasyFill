@@ -11,8 +11,16 @@ export function getBackendUrl() {
 }
 
 export async function matchFields(fields, profile) {
-  const res = await axios.post(`${BASE_URL}/match`, { fields, profile }, { timeout: 12000 });
+  // The /match endpoint only does key-matching and ignores dropdown options;
+  // strip the (potentially large) options arrays to keep the payload small.
+  const slim = fields.map(({ options, ...rest }) => rest);
+  const res = await axios.post(`${BASE_URL}/match`, { fields: slim, profile }, { timeout: 12000 });
   return res.data.mapping;
+}
+
+export async function selectOptions(items) {
+  const res = await axios.post(`${BASE_URL}/select-option`, { items }, { timeout: 12000 });
+  return res.data.selections || {};
 }
 
 export async function generateText({ profile, label, placeholder, nearby, host }) {

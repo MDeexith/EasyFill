@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
-from routes import generate, jobs, match, parse_resume
+from routes import generate, jobs, match, parse_resume, select_option
 
 
 app = FastAPI(title="EasyFill Backend")
@@ -23,6 +23,7 @@ app.include_router(match.router, prefix="/match")
 app.include_router(parse_resume.router, prefix="/parse-resume")
 app.include_router(generate.router, prefix="/generate")
 app.include_router(jobs.router, prefix="/jobs")
+app.include_router(select_option.router, prefix="/select-option")
 
 
 @app.get("/health")

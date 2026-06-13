@@ -413,6 +413,46 @@ export const FORM_SCANNER_JS = `
     return false;
   }
 
+  // Capture the option list of a dropdown so the matcher can resolve which
+  // option best represents the profile value (e.g. "USA" -> "United States").
+  // Native <select> reads el.options directly; custom dropdowns are read
+  // best-effort from their aria-controls listbox if it's already in the DOM.
+  // Returns [] when no options are statically available.
+  var OPT_MAX = 200;
+  var OPT_TEXT_MAX = 80;
+  function extractOptions(el, widget) {
+    var out = [];
+    try {
+      if (widget === 'select' && el.options) {
+        for (var i = 0; i < el.options.length && out.length < OPT_MAX; i++) {
+          var o = el.options[i];
+          var label = (o.text || o.label || '').trim().slice(0, OPT_TEXT_MAX);
+          var value = (o.value != null ? String(o.value) : '').slice(0, OPT_TEXT_MAX);
+          if (!label && !value) continue;
+          out.push({ value: value, label: label });
+        }
+        return out;
+      }
+      if (widget === 'button-dropdown' || widget === 'combobox-input') {
+        var controls = el.getAttribute && el.getAttribute('aria-controls');
+        var listbox = null;
+        if (controls) {
+          var doc = el.ownerDocument || document;
+          try { listbox = doc.getElementById(controls); } catch (e) {}
+        }
+        if (!listbox) return out;
+        var opts = listbox.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], li, option');
+        for (var j = 0; j < opts.length && out.length < OPT_MAX; j++) {
+          var text = ((opts[j].innerText || opts[j].textContent) || '').trim().slice(0, OPT_TEXT_MAX);
+          if (!text) continue;
+          var ov = (opts[j].getAttribute && (opts[j].getAttribute('data-value') || opts[j].getAttribute('value'))) || '';
+          out.push({ value: String(ov).slice(0, OPT_TEXT_MAX), label: text });
+        }
+      }
+    } catch (e) {}
+    return out;
+  }
+
   function describeField(el) {
     var afId = el.getAttribute(AF_ATTR);
     if (!afId) {
@@ -462,6 +502,13 @@ export const FORM_SCANNER_JS = `
         ? isLabeledDropdownTrigger(el, label, ariaLabel, name, nearbyText)
         : true,
     };
+
+    // For dropdowns, capture the selectable options so the matcher can pick
+    // the one that best represents the profile value.
+    if (widget === 'select' || widget === 'button-dropdown' || widget === 'combobox-input') {
+      var opts = extractOptions(el, widget);
+      if (opts.length > 0) desc.options = opts;
+    }
 
     // For checkables, capture per-input metadata so scanForms() can fold
     // sibling radios/checkboxes (same name) into one synthetic group field.
@@ -574,7 +621,8 @@ export const FORM_SCANNER_JS = `
 
     // Stable fingerprint of the field set; suppress duplicate posts
     var fp = unique.map(function(f) {
-      return f.id + ':' + f.name + ':' + f.type + ':' + f.autocomplete;
+      return f.id + ':' + f.name + ':' + f.type + ':' + f.autocomplete +
+        ':' + (f.options ? f.options.length : 0);
     }).join('|');
 
     if (fp === lastFingerprint && fp !== '') {
