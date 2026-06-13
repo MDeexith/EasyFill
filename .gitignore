@@ -1,2 +1,9 @@
 backend/node_modules/
 .claude/
+backend/venv/
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
