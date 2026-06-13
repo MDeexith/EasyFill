@@ -2,8 +2,11 @@ import os
 import asyncio
 from openai import AsyncOpenAI
 
-PRIMARY_MODEL = "google/gemma-4-26b-a4b-it:free"
-FALLBACK_MODEL = "openai/gpt-oss-120b:free"
+OPENROUTER_MODEL = "openai/gpt-oss-120b:free"
+
+# FastRouter — used only when OpenRouter free quota is exhausted (429/402).
+FASTROUTER_BASE_URL = os.environ.get("FASTROUTER_BASE_URL", "https://api.fastrouter.ai/api/v1")
+FASTROUTER_MODEL = os.environ.get("FASTROUTER_MODEL", "openai/gpt-5.4-nano")
 
 
 def _client() -> AsyncOpenAI:
@@ -11,6 +14,24 @@ def _client() -> AsyncOpenAI:
         api_key=os.environ["OPENROUTER_API_KEY"],
         base_url="https://openrouter.ai/api/v1",
     )
+
+
+def _fastrouter_client():
+    key = os.environ.get("FASTROUTER_API_KEY")
+    if not key:
+        return None
+    return AsyncOpenAI(api_key=key, base_url=FASTROUTER_BASE_URL)
+
+
+def _is_quota_error(e) -> bool:
+    """True when an error signals OpenRouter free quota is exhausted (429 rate limit / 402 payment)."""
+    if e is None:
+        return False
+    status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+    if status in (402, 429):
+        return True
+    msg = str(e).lower()
+    return any(s in msg for s in ("rate limit", "rate-limit", "quota", "402", "429", "insufficient", "payment required"))
 
 
 async def _call(model: str, messages: list) -> str:
@@ -25,26 +46,43 @@ async def _call(model: str, messages: list) -> str:
     return response.choices[0].message.content.strip()
 
 
-async def _parallel_with_fallback(messages: list) -> str:
-    """
-    Fire both models concurrently. Return the primary (gemma) response if it
-    succeeds; if it fails, return the already-running fallback (gpt-oss) response.
-    """
-    primary_task = asyncio.create_task(_call(PRIMARY_MODEL, messages))
-    fallback_task = asyncio.create_task(_call(FALLBACK_MODEL, messages))
+async def _call_fastrouter(messages: list) -> str:
+    client = _fastrouter_client()
+    if client is None:
+        raise RuntimeError("FASTROUTER_API_KEY not set")
+    response = await asyncio.wait_for(
+        client.chat.completions.create(
+            model=FASTROUTER_MODEL,
+            messages=messages,
+            temperature=0,
+        ),
+        timeout=30.0,
+    )
+    return response.choices[0].message.content.strip()
 
+
+async def _call_with_fallback(messages: list, allow_fastrouter: bool = False) -> str:
+    """
+    Call the OpenRouter free model. If it fails because the free quota is
+    exhausted (429/402) and `allow_fastrouter` is set, switch to FastRouter (paid).
+    """
     try:
-        result = await primary_task
-        fallback_task.cancel()
+        result = await _call(OPENROUTER_MODEL, messages)
+        print(f"[openrouter] answer picked from OPENROUTER: {OPENROUTER_MODEL}")
         return result
     except Exception as e:
-        print(f"[openrouter] primary ({PRIMARY_MODEL}) failed: {e} — using fallback")
-        return await fallback_task
+        print(f"[openrouter] model ({OPENROUTER_MODEL}) failed: {e}")
+        if allow_fastrouter and _is_quota_error(e):
+            print(f"[openrouter] free quota exhausted — switching to FastRouter ({FASTROUTER_MODEL})")
+            result = await _call_fastrouter(messages)
+            print(f"[openrouter] answer picked from FASTROUTER: {FASTROUTER_MODEL}")
+            return result
+        raise
 
 
-async def generate(prompt: str) -> str:
+async def generate(prompt: str, *, allow_fastrouter_fallback: bool = False) -> str:
     messages = [{"role": "user", "content": prompt}]
-    return await _parallel_with_fallback(messages)
+    return await _call_with_fallback(messages, allow_fastrouter=allow_fastrouter_fallback)
 
 
 async def generate_with_image(prompt: str, image_base64: str) -> str:
@@ -61,4 +99,4 @@ async def generate_with_image(prompt: str, image_base64: str) -> str:
             ],
         }
     ]
-    return await _parallel_with_fallback(messages)
+    return await _call_with_fallback(messages)
