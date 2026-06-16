@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EasyFill</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header>
+      <div class="logo">
+        <span class="logo-icon">⚡</span>
+        <span class="logo-text">EasyFill</span>
+      </div>
+      <button id="btn-settings" class="icon-btn" title="Settings">⚙</button>
+    </header>
+
+    <!-- Status card -->
+    <div id="status-card" class="card">
+      <div id="no-profile" class="state hidden">
+        <p class="state-title">No profile yet</p>
+        <p class="state-sub">Add your details to start auto-filling job applications.</p>
+        <button id="btn-setup" class="btn btn-primary">Set up profile</button>
+      </div>
+
+      <div id="ready" class="state hidden">
+        <div class="stat-row">
+          <div class="stat">
+            <span id="stat-fields" class="stat-value">—</span>
+            <span class="stat-label">Fields found</span>
+          </div>
+          <div class="stat">
+            <span id="stat-mapped" class="stat-value">—</span>
+            <span class="stat-label">Matched</span>
+          </div>
+        </div>
+        <div id="page-url" class="page-url">—</div>
+        <button id="btn-fill" class="btn btn-primary" style="margin-top:12px">Fill this page</button>
+        <button id="btn-rescan" class="btn btn-ghost" style="margin-top:6px">Re-scan</button>
+      </div>
+
+      <div id="no-fields" class="state hidden">
+        <p class="state-title">No form fields detected</p>
+        <p class="state-sub">Open a job application page to auto-fill it.</p>
+        <button id="btn-rescan2" class="btn btn-ghost">Re-scan page</button>
+      </div>
+    </div>
+
+    <!-- Settings panel (hidden by default) -->
+    <div id="settings-panel" class="card hidden">
+      <label class="field-label">Backend URL</label>
+      <input id="backend-url" type="url" class="text-input" placeholder="https://easyfill.onrender.com">
+      <div class="row" style="margin-top:8px;gap:8px">
+        <button id="btn-save-url" class="btn btn-primary" style="flex:1">Save</button>
+        <button id="btn-cancel-settings" class="btn btn-ghost" style="flex:1">Cancel</button>
+      </div>
+      <hr>
+      <button id="btn-edit-profile" class="btn btn-ghost" style="width:100%;margin-top:4px">Edit profile →</button>
+    </div>
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

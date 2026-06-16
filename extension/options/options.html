@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EasyFill — Profile</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- Sticky header -->
+    <header>
+      <div class="logo">
+        <span class="logo-icon">⚡</span>
+        <span class="logo-text">EasyFill</span>
+      </div>
+      <div class="header-actions">
+        <button id="btn-save" class="btn btn-primary">Save profile</button>
+      </div>
+    </header>
+
+    <!-- Toast -->
+    <div id="toast" class="toast hidden"></div>
+
+    <main>
+
+      <!-- Resume upload -->
+      <section class="card upload-card">
+        <div class="upload-info">
+          <strong>Import from résumé</strong>
+          <span>Upload a PDF and we'll parse your details automatically.</span>
+        </div>
+        <div class="upload-actions">
+          <input type="file" id="resume-input" accept=".pdf" style="display:none">
+          <button id="btn-upload" class="btn btn-outline">
+            <span id="upload-label">Upload PDF</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Identity -->
+      <section class="card">
+        <h2 class="section-title">Identity</h2>
+        <div class="grid2">
+          <div class="field"><label>First name</label><input type="text" data-key="firstName"></div>
+          <div class="field"><label>Last name</label><input type="text" data-key="lastName"></div>
+          <div class="field"><label>Middle name</label><input type="text" data-key="middleName"></div>
+          <div class="field"><label>Preferred name</label><input type="text" data-key="preferredName"></div>
+          <div class="field"><label>Full name (auto-composed)</label><input type="text" data-key="name"></div>
+          <div class="field"><label>Pronouns</label><input type="text" data-key="pronouns" placeholder="e.g. he/him"></div>
+          <div class="field"><label>Date of birth</label><input type="date" data-key="dateOfBirth"></div>
+          <div class="field"><label>Gender</label><input type="text" data-key="gender" placeholder="e.g. Male, Female, Non-binary"></div>
+        </div>
+      </section>
+
+      <!-- Contact -->
+      <section class="card">
+        <h2 class="section-title">Contact</h2>
+        <div class="grid2">
+          <div class="field"><label>Email</label><input type="email" data-key="email"></div>
+          <div class="field"><label>Phone</label><input type="tel" data-key="phone"></div>
+        </div>
+      </section>
+
+      <!-- Address -->
+      <section class="card">
+        <h2 class="section-title">Address</h2>
+        <div class="grid2">
+          <div class="field col-span-2"><label>Street address</label><input type="text" data-key="address"></div>
+          <div class="field"><label>City</label><input type="text" data-key="city"></div>
+          <div class="field"><label>State / Province</label><input type="text" data-key="state"></div>
+          <div class="field"><label>Zip / Postal code</label><input type="text" data-key="zipCode"></div>
+          <div class="field"><label>Country</label><input type="text" data-key="country"></div>
+        </div>
+      </section>
+
+      <!-- Social / URLs -->
+      <section class="card">
+        <h2 class="section-title">Online presence</h2>
+        <div class="grid2">
+          <div class="field"><label>LinkedIn URL</label><input type="url" data-key="linkedIn" placeholder="https://linkedin.com/in/…"></div>
+          <div class="field"><label>GitHub URL</label><input type="url" data-key="github" placeholder="https://github.com/…"></div>
+          <div class="field col-span-2"><label>Portfolio / website</label><input type="url" data-key="portfolio" placeholder="https://…"></div>
+        </div>
+      </section>
+
+      <!-- Work -->
+      <section class="card">
+        <h2 class="section-title">Work</h2>
+        <div class="grid2">
+          <div class="field"><label>Current title</label><input type="text" data-key="currentTitle"></div>
+          <div class="field"><label>Current company</label><input type="text" data-key="currentCompany"></div>
+          <div class="field"><label>Years of experience</label><input type="number" min="0" max="60" data-key="yearsExperience"></div>
+          <div class="field"><label>Notice period</label><input type="text" data-key="noticePeriod" placeholder="e.g. 2 weeks"></div>
+          <div class="field"><label>Work authorization</label><input type="text" data-key="workAuthorization" placeholder="e.g. US Citizen, H-1B, OPT"></div>
+          <div class="field"><label>Willing to relocate</label>
+            <select data-key="willingToRelocate">
+              <option value="">— select —</option>
+              <option value="Yes">Yes</option>
+              <option value="No">No</option>
+              <option value="Open to discuss">Open to discuss</option>
+            </select>
+          </div>
+        </div>
+      </section>
+
+      <!-- Compensation -->
+      <section class="card">
+        <h2 class="section-title">Compensation &amp; availability</h2>
+        <div class="grid2">
+          <div class="field"><label>Current salary</label><input type="text" data-key="currentSalary" placeholder="e.g. $120,000"></div>
+          <div class="field"><label>Expected salary</label><input type="text" data-key="expectedSalary" placeholder="e.g. $140,000"></div>
+          <div class="field"><label>Available start date</label><input type="text" data-key="startDate" placeholder="e.g. Immediately, 2 weeks"></div>
+        </div>
+      </section>
+
+      <!-- Content -->
+      <section class="card">
+        <h2 class="section-title">Cover letter &amp; skills</h2>
+        <div class="field" style="margin-bottom:14px">
+          <label>Cover letter / summary</label>
+          <textarea data-key="coverLetter" rows="6" placeholder="Paste your default cover letter or a brief summary about yourself…"></textarea>
+        </div>
+        <div class="grid2">
+          <div class="field"><label>Skills <span class="hint">(comma-separated)</span></label><input type="text" data-key="skills" placeholder="React, TypeScript, Python…"></div>
+          <div class="field"><label>Languages</label><input type="text" data-key="languages" placeholder="English, Spanish…"></div>
+        </div>
+        <div class="field" style="margin-top:14px">
+          <label>References</label>
+          <textarea data-key="references" rows="3" placeholder="Name, title, contact…"></textarea>
+        </div>
+      </section>
+
+      <!-- Experience (dynamic) -->
+      <section class="card">
+        <div class="section-header">
+          <h2 class="section-title">Experience</h2>
+          <button id="btn-add-exp" class="btn btn-outline btn-sm">+ Add role</button>
+        </div>
+        <div id="experience-list"></div>
+      </section>
+
+      <!-- Education (dynamic) -->
+      <section class="card">
+        <div class="section-header">
+          <h2 class="section-title">Education</h2>
+          <button id="btn-add-edu" class="btn btn-outline btn-sm">+ Add entry</button>
+        </div>
+        <div id="education-list"></div>
+      </section>
+
+    </main>
+
+    <footer>
+      <button id="btn-save-bottom" class="btn btn-primary btn-wide">Save profile</button>
+    </footer>
+
+  </div>
+  <script type="module" src="options.js"></script>
+</body>
+</html>
