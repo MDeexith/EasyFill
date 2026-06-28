@@ -65,7 +65,7 @@ async def select_option(body: SelectOptionRequest):
     prompt = PROMPT_TEMPLATE.replace("{{ITEMS}}", json.dumps(items_payload))
 
     try:
-        raw = await generate(prompt)
+        raw = await generate(prompt, allow_fastrouter_fallback=True)
         json_str = re.sub(r"^```[a-z]*\n?", "", raw)
         json_str = re.sub(r"\n?```$", "", json_str)
         parsed = json.loads(json_str)

@@ -17,13 +17,17 @@ Extract structured profile data from this resume text. Return ONLY a valid JSON 
   "currentTitle": "",
   "currentCompany": "",
   "yearsExperience": 0,
+  "workAuthorization": "",
+  "languages": "",
   "skills": "",
   "experience": [
     {
-      "company": "",
       "title": "",
+      "company": "",
+      "location": "",
       "startDate": "",
       "endDate": "",
+      "skills": "",
       "description": ""
     }
   ],
@@ -32,16 +36,26 @@ Extract structured profile data from this resume text. Return ONLY a valid JSON 
       "institution": "",
       "degree": "",
       "field": "",
-      "graduationYear": ""
+      "year": "",
+      "startDate": "",
+      "endDate": ""
     }
   ]
 }
 
 Rules:
 - Output ONLY the JSON object, no markdown, no explanation
-- skills: comma-separated string of technical/soft skills
+- skills: comma-separated string of technical/soft skills found anywhere in the resume
+- languages: comma-separated string of human languages (e.g. "English, Spanish, Hindi"). Omit if not mentioned.
+- workAuthorization: the candidate's work authorization status. Look for phrases like "US Citizen", "Permanent Resident", "Green Card", "H1B", "H-1B", "OPT", "STEM OPT", "EAD", "L1", "TN Visa", "authorized to work in the US", "eligible to work". Output the exact phrase found, or a short normalized form like "US Citizen" / "H1B" / "OPT". Omit if not mentioned.
 - name: full name (firstName + lastName combined)
-- yearsExperience: estimated total years from experience history
+- yearsExperience: estimated total years calculated from experience history dates; 0 if unknown
+- startDate / endDate: use YYYY-MM format (e.g. "2021-06"). Use empty string "" for a current/ongoing role's endDate — do NOT use "Present"
+- year in education: 4-digit graduation year as a string (e.g. "2022")
+- skills in experience: comma-separated list of technologies/tools used in that specific role (e.g. "Go, Kafka, Redis")
+- description in experience: bullet points joined with newline (\n), each starting with the bullet text (no "•")
+- state: the state or province. For US addresses use the 2-letter code (e.g. "CA"). For other countries derive it from the city if well-known (e.g. Mumbai → "Maharashtra", Bangalore → "Karnataka", London → "England"). Leave empty only if truly unknown
+- portfolio: only a personal website or portfolio URL (http/https). Do NOT put LinkedIn, GitHub, or email addresses here. Leave empty if not found
 
 Resume text:
 {{RESUME_TEXT}}
