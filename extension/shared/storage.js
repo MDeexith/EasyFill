@@ -127,6 +127,16 @@ export async function clearFieldCorrections() {
   await remove('field_corrections');
 }
 
+// ─── Resume text ─────────────────────────────────────────────────────────────
+
+export async function saveResumeText(text) {
+  await set('resume_text', text);
+}
+
+export async function loadResumeText() {
+  return (await get('resume_text')) ?? '';
+}
+
 // ─── Settings ────────────────────────────────────────────────────────────────
 
 export async function getBackendUrl() {

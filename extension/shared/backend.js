@@ -1,26 +1,22 @@
 import { getBackendUrl } from './storage.js';
 
+// Route POST requests through the background service worker to bypass CORS.
+// Service workers have cross-origin fetch privileges via host_permissions;
+// content scripts do not, so direct fetch from a content script can be blocked.
 async function post(path, body, timeoutMs = 15000) {
-  const base = await getBackendUrl();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(`${base}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
-  } finally {
-    clearTimeout(timer);
-  }
+  const result = await chrome.runtime.sendMessage({
+    type: 'BACKEND_FETCH',
+    path,
+    body,
+    timeoutMs,
+  });
+  if (!result?.ok) throw new Error(result?.error ?? 'Backend fetch failed');
+  return result.data;
 }
 
 export async function matchFields(fields, profile) {
   const slim = fields.map(({ options, ...rest }) => rest);
-  const data = await post('/match', { fields: slim, profile }, 12000);
+  const data = await post('/match', { fields: slim, profile }, 60000);
   return data.mapping;
 }
 
@@ -29,8 +25,8 @@ export async function selectOptions(items) {
   return data.selections ?? {};
 }
 
-export async function generateText({ profile, label, placeholder, nearby, host }) {
-  const data = await post('/generate', { profile, label, placeholder, nearby, host }, 90000);
+export async function generateText({ profile, label, placeholder, nearby, host, resumeText }) {
+  const data = await post('/generate', { profile, label, placeholder, nearby, host, resumeText: resumeText || '' }, 90000);
   return data.text;
 }
 
@@ -49,7 +45,7 @@ export async function parseResume(file) {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    return data.profile;
+    return { profile: data.profile, resumeText: data.resumeText || '' };
   } finally {
     clearTimeout(timer);
   }

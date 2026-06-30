@@ -42,7 +42,8 @@ function renderStatus(status) {
   }
   showState(ready);
   statFields.textContent = status.fieldsFound;
-  statMapped.textContent = status.fieldsMapped ?? '—';
+  statMapped.textContent = status.fieldsMapped > 0 ? status.fieldsMapped : '—';
+  setFillBtn('Fill this page', false);
   try {
     const u = new URL(status.url || '');
     pageUrl.textContent = u.hostname + u.pathname;
@@ -104,20 +105,25 @@ $('btn-save-url').addEventListener('click', async () => {
   settingsPanel.classList.add('hidden');
 });
 
+function setFillBtn(text, disabled) {
+  const btn = $('btn-fill');
+  btn.textContent = text;
+  btn.disabled = disabled;
+}
+
 async function triggerFill() {
   const tab = await getActiveTab();
   if (!tab) return;
+  setFillBtn('Filling…', true);
   await sendToTab(tab, { type: 'TRIGGER_FILL' });
 }
 
 async function triggerRescan() {
   const tab = await getActiveTab();
   if (!tab) return;
+  setFillBtn('Scanning fields…', true);
+  statMapped.textContent = '—';
   await sendToTab(tab, { type: 'RESCAN' });
-  setTimeout(async () => {
-    const status = await sendToTab(tab, { type: 'GET_STATUS' });
-    renderStatus(status);
-  }, 1500);
 }
 
 $('btn-fill').addEventListener('click', triggerFill);
@@ -133,10 +139,25 @@ chrome.runtime.onMessage.addListener((msg) => {
       showState(ready);
       pageUrl.textContent = '';
       try { const u = new URL(msg.url || ''); pageUrl.textContent = u.hostname + u.pathname; } catch {}
+    } else {
+      showState(noFields);
     }
   }
+  if (msg.type === 'FILL_MATCHING') {
+    setFillBtn('Matching fields…', true);
+    statMapped.textContent = '…';
+  }
+  if (msg.type === 'FILL_STARTED') {
+    setFillBtn('Filling…', true);
+    statMapped.textContent = '…';
+  }
+  if (msg.type === 'FILL_GENERATING') {
+    setFillBtn('Generating answers…', true);
+    statMapped.textContent = '…';
+  }
   if (msg.type === 'FILL_COMPLETE') {
-    statMapped.textContent = msg.filled ?? '—';
+    statMapped.textContent = msg.filled > 0 ? msg.filled : '0';
+    setFillBtn('Fill this page', false);
   }
 });
 

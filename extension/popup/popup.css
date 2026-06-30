@@ -63,6 +63,7 @@ header {
 }
 .btn:hover { opacity: .85; }
 .btn:active { opacity: .7; }
+.btn:disabled { opacity: .6; cursor: not-allowed; background: #3d3d52 !important; color: #9090a8 !important; }
 
 .btn-primary { background: #6366f1; color: #fff; }
 .btn-ghost {
