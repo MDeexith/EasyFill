@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Auto-fill job applications from your saved profile",
 
-  "permissions": ["storage", "activeTab", "scripting"],
+  "permissions": ["storage", "activeTab", "scripting", "tabs"],
   "host_permissions": ["<all_urls>"],
 
   "action": {
@@ -50,7 +50,8 @@
         "shared/enrich.js",
         "shared/matcher/index.js",
         "shared/matcher/heuristics.js",
-        "shared/matcher/llmClient.js"
+        "shared/matcher/llmClient.js",
+        "shared/optionResolver.js"
       ],
       "matches": ["<all_urls>"]
     }

@@ -371,18 +371,31 @@
 
   var CHIP_KEYS = { skills: true, languages: true };
 
-  function doFill(mapping, profile, groupMeta) {
+  function doFill(mapping, profile, groupMeta, optionSelections, generatedValues) {
     var filled = 0;
     Object.keys(mapping).forEach(function (fieldId) {
       var profileKey = mapping[fieldId];
       if (!profileKey) return;
+
+      // Use AI-generated answer for open-ended question fields.
+      if (generatedValues && generatedValues[fieldId]) {
+        var qEl = findEl(fieldId);
+        if (qEl && fillOne(qEl, generatedValues[fieldId])) filled++;
+        return;
+      }
+
       var val = profile[profileKey];
       if ((val === undefined || val === null || val === '') && profileKey === 'expectedSalary') val = profile.salary;
       if (val === undefined || val === null || val === '') return;
 
+      // Prefer AI/locally-resolved option label over raw profile value for grouped widgets.
+      var resolvedVal = (optionSelections && optionSelections[fieldId] != null && optionSelections[fieldId] !== '')
+        ? optionSelections[fieldId]
+        : val;
+
       var meta = groupMeta && groupMeta[fieldId];
-      if (meta && meta.widget === 'radio-group')    { if (fillRadioGroup(meta.options, val))    filled++; return; }
-      if (meta && meta.widget === 'checkbox-group') { if (fillCheckboxGroup(meta.options, val)) filled++; return; }
+      if (meta && meta.widget === 'radio-group')    { if (fillRadioGroup(meta.options, resolvedVal))    filled++; return; }
+      if (meta && meta.widget === 'checkbox-group') { if (fillCheckboxGroup(meta.options, resolvedVal)) filled++; return; }
 
       var el = findEl(fieldId);
       if (!el) return;
@@ -405,7 +418,7 @@
     if (!e.data || e.data.source !== 'easyfill') return;
 
     if (e.data.type === 'DO_FILL') {
-      var filled = doFill(e.data.mapping || {}, e.data.profile || {}, e.data.groupMeta || {});
+      var filled = doFill(e.data.mapping || {}, e.data.profile || {}, e.data.groupMeta || {}, e.data.optionSelections || {}, e.data.generatedValues || {});
       window.postMessage({ source: 'easyfill', type: 'FILL_COMPLETE', filled: filled }, '*');
     }
 

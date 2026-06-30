@@ -11,17 +11,24 @@
 (async () => {
   const ext = (path) => chrome.runtime.getURL(path);
 
-  let installScanner, matchFieldsToProfile, loadProfile, getAiEnabled, mergeFieldCorrections;
+  let installScanner, matchFieldsToProfile, loadProfile, getAiEnabled, mergeFieldCorrections,
+      loadResumeText, resolveLocally, resolveWithAi, enrichProfile, generateText;
 
   try {
     ([
       { installScanner },
       { matchFieldsToProfile },
-      { loadProfile, getAiEnabled, mergeFieldCorrections },
+      { loadProfile, getAiEnabled, mergeFieldCorrections, loadResumeText },
+      { resolveLocally, resolveWithAi },
+      { enrichProfile },
+      { generateText },
     ] = await Promise.all([
       import(ext('scanner/formScanner.js')),
       import(ext('shared/matcher/index.js')),
       import(ext('shared/storage.js')),
+      import(ext('shared/optionResolver.js')),
+      import(ext('shared/enrich.js')),
+      import(ext('shared/backend.js')),
     ]));
   } catch (err) {
     console.error('[EasyFill] Failed to load extension modules:', err);
@@ -33,6 +40,40 @@
   let lastFields  = [];
   let lastMapping = {};
   let fillPending = false;
+
+  // ─── Resume text fallback from profile ───────────────────────────────────
+
+  function buildResumeFromProfile(profile) {
+    const lines = [];
+    if (profile.name || profile.firstName) lines.push((profile.name || `${profile.firstName} ${profile.lastName}`).trim());
+    if (profile.currentTitle) lines.push(profile.currentTitle);
+    if (profile.currentCompany) lines.push(`at ${profile.currentCompany}`);
+    if (profile.skills) lines.push(`\nSkills: ${profile.skills}`);
+    const xp = Array.isArray(profile.experience) ? profile.experience : [];
+    if (xp.length > 0) {
+      lines.push('\nExperience:');
+      for (const e of xp) {
+        lines.push(`${e.title || ''} at ${e.company || ''} (${e.startDate || ''}–${e.endDate || 'Present'})`);
+        if (e.description) lines.push(e.description);
+      }
+    }
+    const edu = Array.isArray(profile.education) ? profile.education : [];
+    if (edu.length > 0) {
+      lines.push('\nEducation:');
+      for (const e of edu) {
+        lines.push(`${e.degree || ''} ${e.field || ''} — ${e.institution || ''} (${e.year || ''})`);
+      }
+    }
+    return lines.join('\n');
+  }
+
+  // ─── Open-ended question detection ────────────────────────────────────────
+
+  function looksLikeQuestion(text) {
+    if (!text) return false;
+    if (text.includes('?')) return true;
+    return /^(why|how|do you|are you|would you|can you|have you|describe|tell us|explain|what |please)/i.test(text.trim());
+  }
 
   // ─── Build group-meta for radio/checkbox widgets ───────────────────────────
 
@@ -50,6 +91,21 @@
     return meta;
   }
 
+  // ─── Fill helper — wraps DO_FILL and resolves with the filled count ──────────
+
+  function doFillAndWait(msg) {
+    return new Promise(resolve => {
+      function handler(e) {
+        if (e.source === window && e.data?.source === 'easyfill' && e.data?.type === 'FILL_COMPLETE') {
+          window.removeEventListener('message', handler);
+          resolve(e.data.filled || 0);
+        }
+      }
+      window.addEventListener('message', handler);
+      window.postMessage(msg, '*');
+    });
+  }
+
   // ─── Core autofill flow ────────────────────────────────────────────────────
   // Sends fill parameters to filler-main.js (MAIN world) via postMessage.
   // filler-main.js bypasses the page CSP; no inline script injection needed.
@@ -59,8 +115,10 @@
     if (fillPending) return;
     fillPending = true;
 
+    notifyPopup({ type: 'FILL_MATCHING' });
+
     try {
-      const profile   = await loadProfile();
+      const profile   = enrichProfile(await loadProfile());
       const aiEnabled = await getAiEnabled();
       const hostname  = location.hostname;
 
@@ -69,28 +127,79 @@
 
       if (Object.keys(mapping).length === 0) {
         console.log('[EasyFill] No fields matched — skipping fill');
-        notifyPopup({ type: 'STATUS', fieldsFound: fields.length, fieldsMapped: 0 });
+        notifyPopup({ type: 'FILL_COMPLETE', filled: 0 });
         return;
       }
 
+      // Resolve dropdown/radio-group options: text-match first, then AI for leftovers.
+      const { selections: localSel, unresolved } = resolveLocally(fields, mapping, profile);
+      let optionSelections = localSel;
+      if (aiEnabled && unresolved.length > 0) {
+        try {
+          const aiSel = await resolveWithAi(unresolved, mapping, profile);
+          optionSelections = { ...localSel, ...aiSel };
+        } catch (_) {}
+      }
+
+      // Split mapping: question fields (longform with question-like label) vs regular.
+      const fieldById = Object.fromEntries(fields.map(f => [f.id, f]));
+      const questionIds = new Set(Object.keys(mapping).filter(id => {
+        const f = fieldById[id];
+        return f && f.longform && looksLikeQuestion(f.label || f.ariaLabel || f.placeholder || f.nearbyText || '');
+      }));
+
+      const regularMapping  = Object.fromEntries(Object.entries(mapping).filter(([id]) => !questionIds.has(id)));
+      const questionMapping = Object.fromEntries(Object.entries(mapping).filter(([id]) =>  questionIds.has(id)));
+      const groupMeta = buildGroupMeta(fields);
+
+      // Phase 1: fill regular fields immediately so the user sees progress.
+      notifyPopup({ type: 'FILL_STARTED' });
+      const filled1 = await doFillAndWait({
+        source: 'easyfill', type: 'DO_FILL',
+        mapping: regularMapping, profile, groupMeta, optionSelections, generatedValues: {},
+      });
+
+      // Phase 2: generate answers for question fields, then fill them.
+      let filled2 = 0;
+      if (aiEnabled && questionIds.size > 0) {
+        notifyPopup({ type: 'FILL_GENERATING' });
+        let resumeText = await loadResumeText();
+        // Fallback: reconstruct from profile if resume text was never stored.
+        if (!resumeText) resumeText = buildResumeFromProfile(profile);
+        const generatedValues = {};
+        const results = await Promise.allSettled(
+          [...questionIds].map(id => {
+            const f = fieldById[id];
+            return generateText({
+              profile,
+              label: f.label || f.ariaLabel || '',
+              placeholder: f.placeholder || '',
+              nearby: f.nearbyText || '',
+              host: hostname,
+              resumeText,
+            }).then(text => ({ id, text }));
+          })
+        );
+        for (const r of results) {
+          if (r.status === 'fulfilled' && r.value?.text) {
+            generatedValues[r.value.id] = r.value.text;
+          }
+        }
+        if (Object.keys(generatedValues).length > 0) {
+          filled2 = await doFillAndWait({
+            source: 'easyfill', type: 'DO_FILL',
+            mapping: questionMapping, profile, groupMeta: {}, optionSelections: {}, generatedValues,
+          });
+        }
+      }
+
+      notifyPopup({ type: 'FILL_COMPLETE', filled: filled1 + filled2, total: fields.length });
+
       const filledAfIds = Object.fromEntries(Object.keys(mapping).map(id => [id, true]));
-
-      // Ask filler-main.js (MAIN world) to fill — bypasses page CSP.
-      window.postMessage({
-        source: 'easyfill',
-        type: 'DO_FILL',
-        mapping,
-        profile,
-        groupMeta: buildGroupMeta(fields),
-      }, '*');
-
-      window.postMessage({
-        source: 'easyfill',
-        type: 'INSTALL_CORRECTION_LISTENER',
-        filledAfIds,
-      }, '*');
+      window.postMessage({ source: 'easyfill', type: 'INSTALL_CORRECTION_LISTENER', filledAfIds }, '*');
     } catch (err) {
       console.error('[EasyFill] Autofill error:', err);
+      notifyPopup({ type: 'FILL_COMPLETE', filled: 0 });
     } finally {
       fillPending = false;
     }
@@ -102,7 +211,7 @@
     if (msg.type === 'FIELDS_SCANNED' || msg.type === 'FIELDS_UPDATED') {
       lastFields = msg.fields || [];
       notifyPopup({ type: 'FIELDS_FOUND', count: lastFields.length });
-      runAutofill(lastFields);
+      // Fill is intentional — user clicks "Fill this page" in the popup (TRIGGER_FILL).
     }
   }
 
@@ -110,10 +219,6 @@
 
   window.addEventListener('message', async (e) => {
     if (e.source !== window || !e.data || e.data.source !== 'easyfill') return;
-
-    if (e.data.type === 'FILL_COMPLETE') {
-      notifyPopup({ type: 'FILL_COMPLETE', filled: e.data.filled, total: lastFields.length });
-    }
 
     if (e.data.type === 'USER_INPUT_DETECTED') {
       const { afId, value } = e.data;

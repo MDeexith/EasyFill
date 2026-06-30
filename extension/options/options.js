@@ -1,4 +1,4 @@
-import { loadProfile, saveProfile, setOnboarded } from '../shared/storage.js';
+import { loadProfile, saveProfile, setOnboarded, saveResumeText } from '../shared/storage.js';
 import { parseResume } from '../shared/backend.js';
 import { enrichProfile } from '../shared/enrich.js';
 
@@ -207,8 +207,11 @@ async function doUpload(file) {
   label.innerHTML = '<span class="spinner"></span> Parsing…';
 
   try {
-    const parsed = await parseResume(file);
+    const { profile: parsed, resumeText } = await parseResume(file);
     if (!parsed) throw new Error('No profile returned');
+
+    // Save raw resume text for context when generating open-ended answers later
+    if (resumeText) await saveResumeText(resumeText);
 
     // Normalise skills array → comma-separated string (backend sometimes returns array)
     if (Array.isArray(parsed.skills)) parsed.skills = parsed.skills.join(', ');
@@ -223,13 +226,21 @@ async function doUpload(file) {
     }
     populateForm(merged);
 
-    // Merge array fields
+    // Merge array fields — normalise field keys to match the form
     if (Array.isArray(parsed.experience) && parsed.experience.length > 0) {
-      experience = parsed.experience;
+      experience = parsed.experience.map(e => ({
+        ...e,
+        // skills may come back as an array from some AI models
+        skills: Array.isArray(e.skills) ? e.skills.join(', ') : (e.skills || ''),
+      }));
       renderExperience();
     }
     if (Array.isArray(parsed.education) && parsed.education.length > 0) {
-      education = parsed.education;
+      education = parsed.education.map(e => ({
+        ...e,
+        // older prompt used graduationYear; new prompt uses year — support both
+        year: e.year || e.graduationYear || '',
+      }));
       renderEducation();
     }
 
