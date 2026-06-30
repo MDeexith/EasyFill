@@ -119,7 +119,7 @@ async def parse_resume(file: UploadFile = File(...)):
         merged["state"] = await _derive_state(merged["city"], merged.get("country", ""))
 
 
-    return {"profile": merged}
+    return {"profile": merged, "resumeText": text[:6000]}
 
 
 
