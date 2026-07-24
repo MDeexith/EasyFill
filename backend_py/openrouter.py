@@ -2,9 +2,15 @@ import os
 import asyncio
 from openai import AsyncOpenAI
 
-OPENROUTER_MODEL = "openai/gpt-oss-120b:free"
+# OpenRouter fallback routing supports max 3 models — sorted best to worst for JSON/instruction tasks
+FREE_MODELS = [
+    "openai/gpt-oss-120b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen3-coder:free",
+]
 
-# FastRouter — used only when OpenRouter free quota is exhausted (429/402).
+
+# FastRouter — paid fallback when all OpenRouter free models are rate-limited
 FASTROUTER_BASE_URL = os.environ.get("FASTROUTER_BASE_URL", "https://api.fastrouter.ai/api/v1")
 FASTROUTER_MODEL = os.environ.get("FASTROUTER_MODEL", "openai/gpt-5.4-nano")
 
@@ -23,29 +29,6 @@ def _fastrouter_client():
     return AsyncOpenAI(api_key=key, base_url=FASTROUTER_BASE_URL)
 
 
-def _is_quota_error(e) -> bool:
-    """True when an error signals OpenRouter free quota is exhausted (429 rate limit / 402 payment)."""
-    if e is None:
-        return False
-    status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
-    if status in (402, 429):
-        return True
-    msg = str(e).lower()
-    return any(s in msg for s in ("rate limit", "rate-limit", "quota", "402", "429", "insufficient", "payment required"))
-
-
-async def _call(model: str, messages: list) -> str:
-    response = await asyncio.wait_for(
-        _client().chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0,
-        ),
-        timeout=30.0,
-    )
-    return response.choices[0].message.content.strip()
-
-
 async def _call_fastrouter(messages: list) -> str:
     client = _fastrouter_client()
     if client is None:
@@ -61,28 +44,41 @@ async def _call_fastrouter(messages: list) -> str:
     return response.choices[0].message.content.strip()
 
 
-async def _call_with_fallback(messages: list, allow_fastrouter: bool = False) -> str:
-    """
-    Call the OpenRouter free model. If it fails because the free quota is
-    exhausted (429/402) and `allow_fastrouter` is set, switch to FastRouter (paid).
-    """
-    try:
-        result = await _call(OPENROUTER_MODEL, messages)
-        print(f"[openrouter] answer picked from OPENROUTER: {OPENROUTER_MODEL}")
-        return result
-    except Exception as e:
-        print(f"[openrouter] model ({OPENROUTER_MODEL}) failed: {e}")
-        if allow_fastrouter and _is_quota_error(e):
-            print(f"[openrouter] free quota exhausted — switching to FastRouter ({FASTROUTER_MODEL})")
-            result = await _call_fastrouter(messages)
-            print(f"[openrouter] answer picked from FASTROUTER: {FASTROUTER_MODEL}")
-            return result
-        raise
+async def _call(messages: list) -> str:
+    response = await asyncio.wait_for(
+        _client().chat.completions.create(
+            model=FREE_MODELS[0],
+            extra_body={"models": FREE_MODELS, "route": "fallback"},
+            messages=messages,
+            temperature=0,
+        ),
+        timeout=60.0,
+    )
+    chosen = getattr(response, "model", FREE_MODELS[0])
+    print(f"[openrouter] answered by {chosen}")
+    return response.choices[0].message.content.strip()
+
+
+def _is_quota_error(e) -> bool:
+    status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+    if status in (402, 429):
+        return True
+    msg = str(e).lower()
+    return any(s in msg for s in ("rate limit", "rate-limit", "quota", "402", "429", "insufficient", "payment required"))
 
 
 async def generate(prompt: str, *, allow_fastrouter_fallback: bool = False) -> str:
     messages = [{"role": "user", "content": prompt}]
-    return await _call_with_fallback(messages, allow_fastrouter=allow_fastrouter_fallback)
+    try:
+        return await _call(messages)
+    except Exception as e:
+        print(f"[openrouter] all free models failed: {e}")
+        if allow_fastrouter_fallback and _is_quota_error(e):
+            print(f"[openrouter] switching to FastRouter ({FASTROUTER_MODEL})")
+            result = await _call_fastrouter(messages)
+            print(f"[openrouter] answered by FastRouter: {FASTROUTER_MODEL}")
+            return result
+        raise
 
 
 async def generate_with_image(prompt: str, image_base64: str) -> str:
@@ -99,4 +95,4 @@ async def generate_with_image(prompt: str, image_base64: str) -> str:
             ],
         }
     ]
-    return await _call_with_fallback(messages)
+    return await _call(messages)

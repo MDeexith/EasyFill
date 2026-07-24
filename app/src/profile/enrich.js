@@ -20,7 +20,10 @@ export function enrichProfile(raw) {
       let totalMonths = 0;
       for (const e of xp) {
         const start = e.startDate ? new Date(e.startDate) : null;
-        const end = e.endDate ? new Date(e.endDate) : new Date();
+        const endRaw = e.endDate;
+        const end = (!endRaw || /^(present|current|now|ongoing)$/i.test(endRaw.trim()))
+          ? new Date()
+          : new Date(endRaw);
         if (start && !isNaN(start) && end && !isNaN(end) && end > start) {
           totalMonths += (end - start) / (1000 * 60 * 60 * 24 * 30.44);
         }

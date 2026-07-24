@@ -20,6 +20,7 @@ class GenerateRequest(BaseModel):
     placeholder: Optional[str] = ""
     nearby: Optional[str] = ""
     host: Optional[str] = ""
+    resumeText: Optional[str] = ""
 
 
 def format_profile(profile: dict) -> str:
@@ -34,11 +35,29 @@ def format_profile(profile: dict) -> str:
     return "\n".join(lines)
 
 
+def _build_resume_from_profile(profile: dict) -> str:
+    lines = []
+    name = profile.get("name") or f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip()
+    if name: lines.append(name)
+    if profile.get("currentTitle"): lines.append(profile["currentTitle"])
+    if profile.get("currentCompany"): lines.append(f"at {profile['currentCompany']}")
+    if profile.get("skills"): lines.append(f"\nSkills: {profile['skills']}")
+    for e in (profile.get("experience") or []):
+        period = f"{e.get('startDate', '')}–{e.get('endDate', 'Present') or 'Present'}"
+        lines.append(f"\n{e.get('title', '')} at {e.get('company', '')} ({period})")
+        if e.get("description"): lines.append(e["description"])
+    for e in (profile.get("education") or []):
+        lines.append(f"\n{e.get('degree', '')} {e.get('field', '')} — {e.get('institution', '')} ({e.get('year', '')})")
+    return "\n".join(lines)
+
+
 @router.post("/")
 async def generate_answer(body: GenerateRequest):
+    resume_context = (body.resumeText or "").strip() or _build_resume_from_profile(body.profile)
     prompt = (
         PROMPT_TEMPLATE
         .replace("{{PROFILE}}", format_profile(body.profile))
+        .replace("{{RESUME_TEXT}}", resume_context or "(not provided)")
         .replace("{{LABEL}}", body.label or "(none)")
         .replace("{{PLACEHOLDER}}", body.placeholder or "(none)")
         .replace("{{NEARBY}}", body.nearby or "(none)")

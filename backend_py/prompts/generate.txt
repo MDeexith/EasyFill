@@ -3,6 +3,9 @@ You are drafting a response for a job application form.
 The candidate's profile:
 {{PROFILE}}
 
+The candidate's resume (raw text for additional context):
+{{RESUME_TEXT}}
+
 Form context (what the page is asking):
 - Field label: {{LABEL}}
 - Field placeholder: {{PLACEHOLDER}}
