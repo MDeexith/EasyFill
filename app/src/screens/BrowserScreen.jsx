@@ -98,10 +98,21 @@ function transformCareerUrl(rawUrl) {
 
 // Pre-page injection: force shadow roots open (Workday) + inject window.chrome stub
 // so Google's sign-in page doesn't block with "this browser may not be secure".
+// Only injected on hosts that need it (see needsPreInject) — Cloudflare's
+// challenge script runs native-function integrity checks in the main frame,
+// and a patched attachShadow / fake window.chrome makes the clearance check
+// fail after verification, causing an infinite challenge loop.
 const PRE_INJECT_JS = `(function(){
   try{var o=Element.prototype.attachShadow;Element.prototype.attachShadow=function(i){return o.call(this,{mode:'open'});};}catch(e){}
   try{if(!window.chrome){window.chrome={app:{isInstalled:false,InstallState:{DISABLED:'disabled',INSTALLED:'installed',NOT_INSTALLED:'not_installed'},RunningState:{CANNOT_RUN:'cannot_run',READY_TO_RUN:'ready_to_run',RUNNING:'running'}},runtime:{id:undefined}};}}catch(e){}
 })();true;`;
+
+function needsPreInject(rawUrl) {
+  try {
+    const h = new URL(rawUrl).hostname;
+    return /(^|\.)(myworkdayjobs\.com|workday\.com|workdayjobs\.com|google\.com)$/.test(h);
+  } catch { return false; }
+}
 
 // Desktop UA: job application forms (Greenhouse, Workday, Lever) render full
 // field sets only on desktop. Mobile UA triggers stripped views or app-store redirects.
@@ -109,6 +120,33 @@ const WEBVIEW_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
   'AppleWebKit/537.36 (KHTML, like Gecko) ' +
   'Chrome/136.0.0.0 Safari/537.36';
+
+// Fallback UA consistent with what Android WebView actually is. The desktop
+// Mac UA above contradicts the Sec-CH-UA client hints the WebView still sends
+// (platform=Android, mobile=?1) — Cloudflare sees the mismatch and re-issues
+// the challenge forever. Once a challenge is detected we drop to this UA for
+// the rest of the browser session so the clearance cookie validates.
+const FALLBACK_MOBILE_UA =
+  'Mozilla/5.0 (Linux; Android 10; K) ' +
+  'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+  'Chrome/136.0.0.0 Mobile Safari/537.36';
+
+// Detects a Cloudflare (or Turnstile) interstitial so we (a) never inject the
+// form scanner into it and (b) can switch to a consistent UA.
+const CF_CHALLENGE_MARKERS =
+  "window._cf_chl_opt || document.querySelector('#challenge-form, #cf-challenge-running, #challenge-running, .cf-turnstile, #turnstile-wrapper')";
+
+const CF_CHALLENGE_PROBE = `(function(){
+  try {
+    if (window.__AF_CF_REPORTED__) return;
+    var cf = !!(${CF_CHALLENGE_MARKERS}) ||
+      /^just a moment|attention required|verify you are human/i.test(document.title || '');
+    if (cf) {
+      window.__AF_CF_REPORTED__ = true;
+      window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'CF_CHALLENGE', url: location.href }));
+    }
+  } catch (e) {}
+})(); true;`;
 
 
 export default function BrowserScreen({ route, navigation }) {
@@ -140,6 +178,10 @@ export default function BrowserScreen({ route, navigation }) {
   const [stepCount, setStepCount] = useState(1);
   const multiStepActiveRef = useRef(false);
   const filledUrlsRef = useRef(new Set());
+  // Cloudflare recovery: once a challenge is seen we swap to an
+  // Android-consistent UA for the rest of this browser session.
+  const [userAgent, setUserAgent] = useState(WEBVIEW_USER_AGENT);
+  const uaDowngradedRef = useRef(false);
 
   const urlRef = useRef(initialUrl);
   const titleRef = useRef('');
@@ -187,6 +229,16 @@ export default function BrowserScreen({ route, navigation }) {
   const panelAnim = useRef(new Animated.Value(0)).current;
   const lastInjectedUrl = useRef('');
   const fieldsRef = useRef([]);
+
+  // Single entry point for scanner injection. Skips the scanner entirely on
+  // Cloudflare interstitials — crawling / mutating the challenge page trips
+  // its integrity checks and restarts the verification loop.
+  const injectScanner = useCallback(() => {
+    webViewRef.current?.injectJavaScript(CF_CHALLENGE_PROBE);
+    webViewRef.current?.injectJavaScript(
+      `if (!(${CF_CHALLENGE_MARKERS})) { ${FORM_SCANNER_JS} }; true;`
+    );
+  }, []);
 
   const longFormFields = fields.filter(f => f.longform);
   const fieldCount = fields.length;
@@ -443,8 +495,8 @@ export default function BrowserScreen({ route, navigation }) {
       'window.__AF_ATS_POLL_STARTED__ = false;' +
       'true;'
     );
-    webViewRef.current?.injectJavaScript(FORM_SCANNER_JS + '; true;');
-  }, []);
+    injectScanner();
+  }, [injectScanner]);
 
   const handleSaveCorrections = useCallback(() => {
     mergeFieldCorrections(pendingCorrections);
@@ -553,7 +605,7 @@ export default function BrowserScreen({ route, navigation }) {
               webViewRef.current?.injectJavaScript(
                 'window.__AF_SCANNER_INSTALLED__ = false; true;'
               );
-              webViewRef.current?.injectJavaScript(FORM_SCANNER_JS + '; true;');
+              injectScanner();
             }, delay);
           });
         }
@@ -608,6 +660,20 @@ export default function BrowserScreen({ route, navigation }) {
         setPhase(prev => prev === 'drafting' ? 'filled' : prev);
       }
 
+      if (data.type === 'CF_CHALLENGE') {
+        // Cloudflare interstitial detected. The spoofed desktop UA contradicts
+        // the Android client hints the WebView sends, which makes Cloudflare
+        // reject the clearance cookie and re-challenge in a loop. Drop to a
+        // consistent mobile UA (once per session) and reload so the challenge
+        // can actually complete.
+        if (!uaDowngradedRef.current) {
+          uaDowngradedRef.current = true;
+          setUserAgent(FALLBACK_MOBILE_UA);
+          setTimeout(() => webViewRef.current?.reload(), 300);
+        }
+        return;
+      }
+
       if (data.type === 'DIAG') {
         // Diagnostic info is logged only — surfaces in `adb logcat | grep AF`
         // for development; never shown in the UI.
@@ -636,7 +702,7 @@ export default function BrowserScreen({ route, navigation }) {
         });
       }
     } catch {}
-  }, [doAutofill]);
+  }, [doAutofill, injectScanner]);
 
   const host = getHostname(currentUrl);
 
@@ -677,7 +743,7 @@ export default function BrowserScreen({ route, navigation }) {
           ref={webViewRef}
           source={webViewSource}
           style={{ flex: 1, backgroundColor: '#fff' }}
-          injectedJavaScriptBeforeContentLoaded={PRE_INJECT_JS}
+          injectedJavaScriptBeforeContentLoaded={needsPreInject(currentUrl) ? PRE_INJECT_JS : undefined}
           onLoadStart={() => {
             setLoading(true);
             setFields([]);
@@ -690,7 +756,7 @@ export default function BrowserScreen({ route, navigation }) {
           onLoadEnd={() => {
             setLoading(false);
             lastInjectedUrl.current = urlRef.current;
-            webViewRef.current?.injectJavaScript(FORM_SCANNER_JS + '; true;');
+            injectScanner();
           }}
           onNavigationStateChange={state => {
             setCurrentUrl(state.url);
@@ -723,14 +789,14 @@ export default function BrowserScreen({ route, navigation }) {
                 'window.__AF_SCANNER_INSTALLED__ = false; window.__AF_ATS_REPORTED__ = {}; true;'
               );
               setTimeout(() => {
-                webViewRef.current?.injectJavaScript(FORM_SCANNER_JS + '; true;');
+                injectScanner();
               }, 1000);
             }
           }}
           onMessage={onMessage}
           onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
           onOpenWindow={onOpenWindow}
-          userAgent={WEBVIEW_USER_AGENT}
+          userAgent={userAgent}
           sharedCookiesEnabled
           javaScriptEnabled
           domStorageEnabled
