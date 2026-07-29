@@ -4,9 +4,9 @@ from openai import AsyncOpenAI
 
 # OpenRouter fallback routing supports max 3 models — sorted best to worst for JSON/instruction tasks
 FREE_MODELS = [
-    "openai/gpt-oss-120b:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen3-coder:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
 ]
 
 
@@ -64,7 +64,12 @@ def _is_quota_error(e) -> bool:
     if status in (402, 429):
         return True
     msg = str(e).lower()
-    return any(s in msg for s in ("rate limit", "rate-limit", "quota", "402", "429", "insufficient", "payment required"))
+    return any(s in msg for s in (
+        "rate limit", "rate-limit", "quota", "402", "429", "insufficient", "payment required",
+        # Free models get delisted without notice — a 404/"unavailable" on the
+        # whole chain is just as dead as a quota error, so fall back too.
+        "404", "not found", "unavailable",
+    ))
 
 
 async def generate(prompt: str, *, allow_fastrouter_fallback: bool = False) -> str:
