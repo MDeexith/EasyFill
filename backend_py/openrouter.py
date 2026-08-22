@@ -55,7 +55,9 @@ async def _call(messages: list) -> str:
             messages=messages,
             temperature=0,
         ),
-        timeout=60.0,
+        # Free-tier models routinely take 50-60s on long prompts; 80s still leaves room
+        # for the FastRouter fallback within the app's 120s client timeout.
+        timeout=80.0,
     )
     chosen = getattr(response, "model", FREE_MODELS[0])
     print(f"[openrouter] answered by {chosen}")
@@ -63,7 +65,9 @@ async def _call(messages: list) -> str:
 
 
 def _should_fallback(e) -> bool:
-    """Quota/rate-limit errors AND model-gone errors (free models get delisted without notice)."""
+    """Quota/rate-limit, model-gone (free models get delisted without notice) and timeout errors."""
+    if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
+        return True
     status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
     if status in (402, 404, 429):
         return True
@@ -80,7 +84,7 @@ async def generate(prompt: str, *, allow_fastrouter_fallback: bool = False) -> s
         return await _call(messages)
     except Exception as e:
         print(f"[openrouter] all free models failed: {e!r}")
-        if allow_fastrouter_fallback and _should_fallback(e):
+        if allow_fastrouter_fallback and _should_fallback(e) and _fastrouter_client() is not None:
             print(f"[openrouter] switching to FastRouter ({FASTROUTER_MODEL})")
             result = await _call_fastrouter(messages)
             print(f"[openrouter] answered by FastRouter: {FASTROUTER_MODEL}")
