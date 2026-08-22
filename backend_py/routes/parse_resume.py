@@ -40,7 +40,9 @@ def _merge(ai: dict, regex: dict) -> dict:
         ai_val = ai.get(f, 0)
         merged[f] = float(ai_val) if _truthy(ai_val) else float(regex.get(f, 0))
     for f in ARRAY_FIELDS:
-        merged[f] = ai.get(f, []) if _truthy(ai.get(f, [])) else regex.get(f, [])
+        entries = ai.get(f, []) if _truthy(ai.get(f, [])) else regex.get(f, [])
+        # Drop empty template-echo entries (models sometimes emit the blank example object)
+        merged[f] = [e for e in entries if isinstance(e, dict) and any(_truthy(v) for v in e.values())]
     return merged
 
 
@@ -57,10 +59,17 @@ async def _extract_hyperlinks(pdf_bytes: bytes) -> dict:
 async def _run_ai(text: str) -> dict:
     try:
         prompt = PROMPT_TEMPLATE.replace("{{RESUME_TEXT}}", text[:10000])
-        raw = await generate(prompt)
+        raw = await generate(prompt, allow_fastrouter_fallback=True)
         s = re.sub(r"^```[a-z]*\n?", "", raw)
         s = re.sub(r"\n?```$", "", s)
-        return json.loads(s)
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            # Some models wrap the JSON in prose — extract the outermost {...} block
+            start, end = s.find("{"), s.rfind("}")
+            if start != -1 and end > start:
+                return json.loads(s[start:end + 1])
+            raise
     except Exception as e:
         print(f"[ai extractor] failed: {e}")
         return {}
@@ -106,9 +115,11 @@ async def parse_resume(file: UploadFile = File(...)):
         if not merged.get(key) and hyperlinks.get(key):
             merged[key] = hyperlinks[key]
 
-    # Calculate YOE from experience dates, merging continuous same-company tenures
-    if not merged.get("yearsExperience"):
-        merged["yearsExperience"] = _calculate_yoe(merged.get("experience", []))
+    # Calculate YOE from experience dates, merging continuous same-company tenures.
+    # Prefer the date-derived value over the model's estimate — models routinely round it down.
+    computed_yoe = _calculate_yoe(merged.get("experience", []))
+    if computed_yoe:
+        merged["yearsExperience"] = computed_yoe
 
     # Clear state if it doesn't look like a real US state code in context
     if merged.get("state") and not merged.get("city"):
@@ -132,7 +143,7 @@ async def _derive_state(city: str, country: str) -> str:
             'Use 2-letter abbreviation for US states (e.g. CA). '
             'For other countries use the full state/province name (e.g. Maharashtra).'
         )
-        result = await generate(prompt)
+        result = await generate(prompt, allow_fastrouter_fallback=True)
         return result.strip().strip('."\'')
     except Exception:
         return ""

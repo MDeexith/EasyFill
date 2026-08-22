@@ -2,12 +2,15 @@ import os
 import asyncio
 from openai import AsyncOpenAI
 
-# OpenRouter fallback routing supports max 3 models — sorted best to worst for JSON/instruction tasks
+# OpenRouter fallback routing supports max 3 models — sorted best to worst for JSON/instruction tasks.
+# Free models get delisted without notice; override via OPENROUTER_FREE_MODELS (comma-separated)
+# so a delisting is a config change, not a code deploy.
+_DEFAULT_FREE_MODELS = "nvidia/nemotron-3-super-120b-a12b:free,google/gemma-4-31b-it:free,z-ai/glm-5.2:free"
 FREE_MODELS = [
-    "openai/gpt-oss-120b:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen3-coder:free",
-]
+    m.strip()
+    for m in os.environ.get("OPENROUTER_FREE_MODELS", _DEFAULT_FREE_MODELS).split(",")
+    if m.strip()
+][:3]
 
 
 # FastRouter — paid fallback when all OpenRouter free models are rate-limited
@@ -18,7 +21,7 @@ FASTROUTER_MODEL = os.environ.get("FASTROUTER_MODEL", "openai/gpt-5.4-nano")
 def _client() -> AsyncOpenAI:
     return AsyncOpenAI(
         api_key=os.environ["OPENROUTER_API_KEY"],
-        base_url="https://openrouter.ai/api/v1",
+        base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
     )
 
 
@@ -59,12 +62,16 @@ async def _call(messages: list) -> str:
     return response.choices[0].message.content.strip()
 
 
-def _is_quota_error(e) -> bool:
+def _should_fallback(e) -> bool:
+    """Quota/rate-limit errors AND model-gone errors (free models get delisted without notice)."""
     status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
-    if status in (402, 429):
+    if status in (402, 404, 429):
         return True
     msg = str(e).lower()
-    return any(s in msg for s in ("rate limit", "rate-limit", "quota", "402", "429", "insufficient", "payment required"))
+    return any(s in msg for s in (
+        "rate limit", "rate-limit", "quota", "402", "429", "insufficient", "payment required",
+        "404", "not found", "no endpoints", "no allowed providers",
+    ))
 
 
 async def generate(prompt: str, *, allow_fastrouter_fallback: bool = False) -> str:
@@ -72,8 +79,8 @@ async def generate(prompt: str, *, allow_fastrouter_fallback: bool = False) -> s
     try:
         return await _call(messages)
     except Exception as e:
-        print(f"[openrouter] all free models failed: {e}")
-        if allow_fastrouter_fallback and _is_quota_error(e):
+        print(f"[openrouter] all free models failed: {e!r}")
+        if allow_fastrouter_fallback and _should_fallback(e):
             print(f"[openrouter] switching to FastRouter ({FASTROUTER_MODEL})")
             result = await _call_fastrouter(messages)
             print(f"[openrouter] answered by FastRouter: {FASTROUTER_MODEL}")
