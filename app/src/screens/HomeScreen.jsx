@@ -18,6 +18,7 @@ import { theme } from '../theme/tokens';
 import { loadProfile, loadFeedJobs, saveFeedJobs } from '../profile/store';
 import { fetchJobFeedForProfile } from '../api/jobsApi';
 import { buildProfileSearchQuery } from '../jobs/profileFeed';
+import { toNavigableUrl } from '../utils/url';
 
 function getInitials(profile) {
   const first = (profile.firstName || profile.name || '').trim();
@@ -145,13 +146,13 @@ export default function HomeScreen({ navigation }) {
     const trimmed = url.trim();
     if (!trimmed) {
       show({
-        title: 'Enter a URL',
-        message: 'Paste a job application URL to open it in the browser.',
+        title: 'Enter a URL or search',
+        message: 'Paste a job application URL, or type what you want to search for.',
         buttons: [{ text: 'OK' }],
       });
       return;
     }
-    const fullUrl = trimmed.startsWith('http') ? trimmed : `https://${trimmed}`;
+    const fullUrl = toNavigableUrl(trimmed);
     setUrl('');
     navigation.navigate('Browser', { url: fullUrl });
   }, [url, navigation, show]);
@@ -199,19 +200,19 @@ export default function HomeScreen({ navigation }) {
               <Icon name="sparkles" size={12} color="rgba(255,255,255,0.6)" />
               <Text style={styles.heroLabel}>AUTOFILL A JOB</Text>
             </View>
-            <Text style={styles.heroTitle}>Paste any application URL</Text>
+            <Text style={styles.heroTitle}>Paste a URL or search the web</Text>
             <View style={styles.urlRow}>
               <View style={styles.urlInputWrap}>
                 <Icon name="link" size={14} color={theme.colors.muted} />
                 <TextInput
                   style={styles.urlInput}
-                  placeholder="jobs.example.com/apply/…"
+                  placeholder="jobs.example.com/apply/… or search"
                   placeholderTextColor={theme.colors.faint}
                   value={url}
                   onChangeText={setUrl}
                   autoCapitalize="none"
                   autoCorrect={false}
-                  keyboardType="url"
+                  keyboardType="web-search"
                   returnKeyType="go"
                   onSubmitEditing={handleOpen}
                 />
