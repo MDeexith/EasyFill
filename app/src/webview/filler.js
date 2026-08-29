@@ -565,25 +565,110 @@ export function buildDirectFillScript(valuesById) {
 // options simply do not exist at scan time — this is why resolveLocally skipped
 // these fields entirely (isDropdown requires a non-empty options array).
 // Opening is serial because focusing one combobox closes another.
-export function buildComboboxHarvestScript(fieldIds) {
+//
+// `generation` is echoed back in the COMBOBOX_OPTIONS message so
+// harvestCoordinator can discard a late reply from a superseded run instead
+// of handing one run's options to another.
+export function buildComboboxHarvestScript(fieldIds, generation = 0) {
   return `
 (function() {
   var ids = ${safeJson(fieldIds || [])};
+  var generation = ${safeJson(generation)};
   var results = {};
 
-  function findEl(afId) {
-    try { return document.querySelector('[data-af-id="' + afId + '"]'); }
-    catch (e) { return null; }
+  // In-page re-entrancy guard. Two step() loops running at once open menus
+  // over each other, which is exactly the condition that makes one widget's
+  // still-mounted listbox get read as the next widget's options. Expressed as
+  // a deadline rather than a boolean so a harvest that dies mid-flight (a page
+  // navigating out from under it) cannot block harvesting forever.
+  var nowTs = Date.now();
+  if (window.__AF_HARVEST_UNTIL__ && nowTs < window.__AF_HARVEST_UNTIL__) return;
+  window.__AF_HARVEST_UNTIL__ = nowTs + 30000;
+
+  ${FILLER_RUNTIME}
+
+  function post() {
+    window.__AF_HARVEST_UNTIL__ = 0;
+    if (window.ReactNativeWebView) {
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        type: 'COMBOBOX_OPTIONS', generation: generation, options: results
+      }));
+    }
   }
 
-  function readOptions(el) {
+  // The listbox attributed to the PREVIOUS field. closeAny() is best-effort,
+  // so the previous widget's menu is frequently still mounted when the next
+  // one is read — reporting it again would attribute one combobox's options
+  // to another and can select an arbitrary answer on a real application.
+  var prevListbox = null;
+
+  var LISTBOX_SELECTOR =
+    '[role="listbox"]:not([aria-hidden="true"]), ' +
+    '[role="menu"]:not([aria-hidden="true"])';
+
+  // Search roots, nearest first: the element's own shadow root (Workday), then
+  // its document (same-origin iframe), then the top document. Mirrors the
+  // reach of FILLER_RUNTIME's findEl, which is what located the field.
+  function scopesOf(el) {
+    var roots = [];
+    try {
+      var r = el.getRootNode ? el.getRootNode() : null;
+      if (r && r.querySelectorAll) roots.push(r);
+    } catch (e) {}
+    try {
+      if (el.ownerDocument && roots.indexOf(el.ownerDocument) === -1) roots.push(el.ownerDocument);
+    } catch (e) {}
+    if (roots.indexOf(document) === -1) roots.push(document);
+    return roots;
+  }
+
+  // aria-controls / aria-owns names THIS field's popup, so it is authoritative
+  // — honoured even when it resolves to a node already read, because some
+  // widgets legitimately reuse one portal container for every menu.
+  function byAssociation(el, roots) {
+    var id = null;
+    try { id = el.getAttribute('aria-controls') || el.getAttribute('aria-owns'); } catch (e) {}
+    if (!id) return null;
+    for (var i = 0; i < roots.length; i++) {
+      var node = null;
+      try {
+        node = roots[i].getElementById ? roots[i].getElementById(id) : null;
+      } catch (e) {}
+      if (!node) continue;
+      try {
+        if (node.getAttribute && node.getAttribute('aria-hidden') === 'true') continue;
+      } catch (e) {}
+      return node;
+    }
+    return null;
+  }
+
+  function findListbox(el) {
+    var roots = scopesOf(el);
+    var assoc = byAssociation(el, roots);
+    if (assoc) return assoc;
+    for (var i = 0; i < roots.length; i++) {
+      var nodes = [];
+      try { nodes = roots[i].querySelectorAll(LISTBOX_SELECTOR); } catch (e) { nodes = []; }
+      for (var j = 0; j < nodes.length; j++) {
+        // An unassociated menu identical to the one the last field used is
+        // assumed stale rather than guessed to belong here. A missed harvest
+        // just leaves the field to the AI resolver; a wrong one picks a wrong
+        // answer on a live application.
+        if (prevListbox && nodes[j] === prevListbox) continue;
+        return nodes[j];
+      }
+    }
+    return null;
+  }
+
+  function readOptionsFrom(listbox) {
     var out = [];
-    var controls = el.getAttribute('aria-controls');
-    var listbox = null;
-    if (controls) { try { listbox = document.getElementById(controls); } catch (e) {} }
-    if (!listbox) listbox = document.querySelector('[role="listbox"]');
-    if (!listbox) return out;
-    var nodes = listbox.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], li');
+    if (!listbox || !listbox.querySelectorAll) return out;
+    var nodes = [];
+    try {
+      nodes = listbox.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], li');
+    } catch (e) { return out; }
     for (var i = 0; i < nodes.length; i++) {
       var label = (nodes[i].innerText || nodes[i].textContent || '').trim();
       if (!label) continue;
@@ -592,24 +677,44 @@ export function buildComboboxHarvestScript(fieldIds) {
     return out;
   }
 
+  // Retry loop modelled on waitForListbox, replacing the single 300ms shot the
+  // harvest used to take: React-Select routinely needs longer than that to
+  // mount its menu, and a miss silently dropped the field.
+  var MAX_ATTEMPTS = 8;
+  var INTERVAL_MS = 120;
+
+  function waitForOptions(el, done) {
+    var attempts = 0;
+    function poll() {
+      attempts++;
+      var lb = null;
+      try { lb = findListbox(el); } catch (e) {}
+      if (lb) {
+        var opts = readOptionsFrom(lb);
+        if (opts.length) { done(lb, opts); return; }
+      }
+      if (attempts >= MAX_ATTEMPTS) { done(null, []); return; }
+      setTimeout(poll, INTERVAL_MS);
+    }
+    setTimeout(poll, INTERVAL_MS);
+  }
+
   function closeAny(el) {
     try {
       el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
-      el.blur();
     } catch (e) {}
+    try { el.blur(); } catch (e) {}
   }
 
   function step(i) {
-    if (i >= ids.length) {
-      if (window.ReactNativeWebView) {
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'COMBOBOX_OPTIONS', options: results
-        }));
-      }
-      return;
-    }
+    if (i >= ids.length) { post(); return; }
     var afId = ids[i];
-    var el = findEl(afId);
+    // findEl comes from FILLER_RUNTIME: it walks shadow roots and same-origin
+    // iframes. The harvest used to duplicate a plain document.querySelector,
+    // which silently dropped every combobox formScanner had tagged inside a
+    // shadow root or an iframe (i.e. all of Workday).
+    var el = null;
+    try { el = findEl(afId); } catch (e) {}
     if (!el) { step(i + 1); return; }
 
     // Native <select> already carries its options; no need to open anything.
@@ -629,13 +734,14 @@ export function buildComboboxHarvestScript(fieldIds) {
       el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
     } catch (e) {}
 
-    // Give the widget time to render its listbox before reading it.
-    setTimeout(function() {
-      var opts = readOptions(el);
-      if (opts.length) results[afId] = opts;
+    waitForOptions(el, function(listbox, opts) {
+      if (opts.length) {
+        results[afId] = opts;
+        prevListbox = listbox;
+      }
       closeAny(el);
       setTimeout(function() { step(i + 1); }, 60);
-    }, 300);
+    });
   }
 
   step(0);
