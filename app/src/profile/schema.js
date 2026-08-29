@@ -30,8 +30,19 @@ export const EMPTY_PROFILE = {
   currentCompany: '',
   yearsExperience: 0,
   workAuthorization: '',
+  authorizedToWork: '',
+  requiresSponsorship: '',
   willingToRelocate: '',
   noticePeriod: '',
+
+  // ── equal-opportunity (US applications) ───────────────────────────────────
+  // Defaults to decline; populated only when the user opts in.
+  hispanicLatino: '',
+  veteranStatus: '',
+  disabilityStatus: '',
+
+  // ── application misc ──────────────────────────────────────────────────────
+  heardAboutUs: '',
 
   // ── compensation / availability ───────────────────────────────────────────
   // `salary` is kept as a deprecated alias resolving to expectedSalary.
@@ -78,8 +89,16 @@ export const PROFILE_FIELD_LABELS = {
   currentCompany: 'Current Company',
   yearsExperience: 'Years of Experience',
   workAuthorization: 'Work Authorization',
+  authorizedToWork: 'Authorized to Work',
+  requiresSponsorship: 'Requires Visa Sponsorship',
   willingToRelocate: 'Willing to Relocate',
   noticePeriod: 'Notice Period',
+
+  hispanicLatino: 'Hispanic / Latino',
+  veteranStatus: 'Veteran Status',
+  disabilityStatus: 'Disability Status',
+
+  heardAboutUs: 'How You Heard About the Job',
 
   salary: 'Expected Salary (legacy)',
   currentSalary: 'Current Salary',
@@ -91,3 +110,10 @@ export const PROFILE_FIELD_LABELS = {
   languages: 'Languages',
   references: 'References',
 };
+
+// Stored profiles predate later schema additions, so a profile read from disk
+// can be missing keys entirely. Merging against EMPTY_PROFILE guarantees every
+// key exists without clobbering anything the user has already set.
+export function mergeWithSchema(stored) {
+  return { ...EMPTY_PROFILE, ...(stored || {}) };
+}

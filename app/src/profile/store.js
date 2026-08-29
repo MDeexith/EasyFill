@@ -1,5 +1,5 @@
 import { createMMKV } from 'react-native-mmkv';
-import { EMPTY_PROFILE } from './schema';
+import { EMPTY_PROFILE, mergeWithSchema } from './schema';
 
 const storage = createMMKV({ id: 'jobautofill-profile' });
 const PROFILE_KEY = 'profile';
@@ -12,7 +12,7 @@ export function loadProfile() {
   const raw = storage.getString(PROFILE_KEY);
   if (!raw) return { ...EMPTY_PROFILE };
   try {
-    return JSON.parse(raw);
+    return mergeWithSchema(JSON.parse(raw));
   } catch {
     return { ...EMPTY_PROFILE };
   }
