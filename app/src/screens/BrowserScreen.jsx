@@ -428,7 +428,11 @@ export default function BrowserScreen({ route, navigation }) {
             if (dec.source === 'ai' || dec.source === 'ai-low') aiMatched++;
           }
           setFillStats(prev => ({ ...prev, aiMatched }));
-        } catch { /* AI failed — fast fill stands */ }
+        } catch (err) {
+          // Fast fill stands, but log the reason: a silent catch here made a
+          // 12s client timeout on /match look like "the AI found nothing".
+          console.warn('[autofill] AI pass failed:', err?.message || err);
+        }
       }
 
       // ── Dropdown option AI resolution ───────────────────────────────────
