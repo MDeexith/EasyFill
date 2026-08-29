@@ -155,6 +155,9 @@ const CF_CHALLENGE_PROBE = `(function(){
 })(); true;`;
 
 
+// Upper bound on one autofill run before the UI gives up and offers a retry.
+const AUTOFILL_WATCHDOG_MS = 60000;
+
 export default function BrowserScreen({ route, navigation }) {
   const { url } = route.params;
   const webViewRef = useRef(null);
@@ -241,6 +244,12 @@ export default function BrowserScreen({ route, navigation }) {
   // a single "resolve" would let a second run's harvest steal the first
   // run's wakeup and strand it forever — see harvestCoordinator.js.
   const harvestCoordinatorRef = useRef(createHarvestCoordinator());
+  // Re-entrancy guard for doAutofill. The FAB stays visible (and tappable)
+  // during 'filling-ai', so a second run was one tap away; multi-step forms
+  // can also re-invoke doAutofill on a timer. A concurrent run superseded run
+  // 1's harvest with {}, injected a second harvest script over the first, and
+  // delivered run 1's COMBOBOX_OPTIONS into run 2's slot.
+  const autofillInFlightRef = useRef(false);
 
   // Single entry point for scanner injection. Skips the scanner entirely on
   // Cloudflare interstitials — crawling / mutating the challenge page trips
@@ -272,15 +281,22 @@ export default function BrowserScreen({ route, navigation }) {
     return () => clearTimeout(timer);
   }, [loading]);
 
-  // Safety net: if filling/filling-ai/drafting hangs (backend timeout, network error),
-  // revert to detected after 25s so user can retry.
+  // Safety net: if filling/filling-ai/drafting hangs (backend timeout, network
+  // error), revert to detected so the user can retry.
+  //
+  // 25s was shorter than the critical path this branch created: pass-2 /match
+  // is 13-20s on free models, the combobox harvest waits up to 8s, and
+  // /select-option adds ~3s on top. The watchdog fired mid-run, put the FAB
+  // back into a tappable state, and invited exactly the concurrent second run
+  // that WEBVIEW_AUTOFILL_TIMEOUT_MS + the in-flight guard below now prevent.
+  // Sized above the sum of those legs plus the client LLM_TIMEOUT headroom.
   useEffect(() => {
     if (phase !== 'filling' && phase !== 'filling-ai' && phase !== 'drafting') return;
     const timer = setTimeout(() => {
       setPhase(prev =>
         (prev === 'filling' || prev === 'filling-ai' || prev === 'drafting') ? 'detected' : prev
       );
-    }, 25000);
+    }, AUTOFILL_WATCHDOG_MS);
     return () => clearTimeout(timer);
   }, [phase]);
 
@@ -376,6 +392,11 @@ export default function BrowserScreen({ route, navigation }) {
   // Unified autofill: two-pass progressive fill.
   // Pass 1 (cache + regex) injects immediately; Pass 2 (AI) fills remaining in background.
   const doAutofill = useCallback(async (scanned) => {
+    if (autofillInFlightRef.current) {
+      console.warn('[autofill] run already in flight — ignoring re-entrant call');
+      return;
+    }
+    autofillInFlightRef.current = true;
     setPhase('filling');
     setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
     // af-ids are handed out afresh (af_1..af_N) on every scan, so a verdict
@@ -482,7 +503,9 @@ export default function BrowserScreen({ route, navigation }) {
 
         if (dropdownIds.length > 0) {
           const harvested = await harvestCoordinatorRef.current.startHarvest(
-            () => webViewRef.current?.injectJavaScript(buildComboboxHarvestScript(dropdownIds)),
+            gen => webViewRef.current?.injectJavaScript(
+              buildComboboxHarvestScript(dropdownIds, gen)
+            ),
             8000
           );
 
@@ -543,6 +566,8 @@ export default function BrowserScreen({ route, navigation }) {
     } catch {
       filledUrlsRef.current.delete(urlRef.current);
       setPhase('detected');
+    } finally {
+      autofillInFlightRef.current = false;
     }
   }, [doAiDraft]);
 
@@ -761,7 +786,7 @@ export default function BrowserScreen({ route, navigation }) {
       }
 
       if (data.type === 'COMBOBOX_OPTIONS') {
-        harvestCoordinatorRef.current.deliver(data.options);
+        harvestCoordinatorRef.current.deliver(data.options, data.generation);
       }
 
       if (data.type === 'USER_INPUT_DETECTED') {

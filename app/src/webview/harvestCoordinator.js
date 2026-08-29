@@ -14,6 +14,9 @@
 // A generation counter fixes this: starting a new harvest immediately
 // settles (with {}) whatever harvest was previously in flight, and each
 // harvest's own timeout only fires if it is still the current generation.
+// The same counter is handed to the injected script and echoed back in its
+// reply, so a late COMBOBOX_OPTIONS message from a superseded run is
+// discarded rather than resolving a newer run with the wrong page's options.
 // Every harvest that is started is guaranteed to settle exactly once, on
 // exactly one of three paths: the page answers, the timeout elapses, or a
 // later harvest supersedes it.
@@ -36,9 +39,10 @@ export function createHarvestCoordinator() {
 
   // Starts a new harvest wait.
   //   inject     — side-effecting function that asks the page for options
-  //                (e.g. injectJavaScript(buildComboboxHarvestScript(ids))).
+  //                (e.g. injectJavaScript(buildComboboxHarvestScript(ids, gen))).
   //                Called synchronously, after any prior harvest has been
-  //                superseded.
+  //                superseded, and handed this harvest's generation so the
+  //                page can echo it back in its reply.
   //   timeoutMs  — how long to wait for a COMBOBOX_OPTIONS reply before
   //                giving up and resolving with {} (default 8000).
   // Returns a Promise<Record<string, Array<{value,label}>>> that always
@@ -53,7 +57,7 @@ export function createHarvestCoordinator() {
 
     return new Promise(resolve => {
       pending = { generation: myGeneration, resolve };
-      inject();
+      inject(myGeneration);
       setTimeout(() => {
         if (pending && pending.generation === myGeneration) {
           pending = null;
@@ -64,9 +68,22 @@ export function createHarvestCoordinator() {
   }
 
   // Called when a COMBOBOX_OPTIONS message arrives from the WebView.
-  // Settles whichever harvest is currently pending (the most recent one —
-  // an older, already-superseded harvest has nothing left to settle).
-  function deliver(options) {
+  //
+  // `generation` is the value the harvest script was built with and echoes
+  // back. Without it, a reply produced by run 1's harvest script — still in
+  // flight in the page when run 2 started — would resolve run 2's promise
+  // with run 1's options, i.e. options read from a page state run 2 knows
+  // nothing about. A stale reply is dropped instead; run 2 then settles on
+  // its own reply or its own timeout, exactly as if the page had said nothing.
+  //
+  // A message carrying no generation at all is accepted, so a harvest script
+  // injected before an app update (or by any caller that omits it) still
+  // works as it did.
+  function deliver(options, generation) {
+    if (!pending) return;
+    if (generation !== undefined && generation !== null && generation !== pending.generation) {
+      return;
+    }
     settlePending(options || {});
   }
 
