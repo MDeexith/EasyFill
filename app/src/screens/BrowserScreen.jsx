@@ -21,8 +21,9 @@ import { theme } from '../theme/tokens';
 import { FORM_SCANNER_JS } from '../webview/formScanner';
 
 import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript, buildComboboxHarvestScript } from '../webview/filler';
+import { createHarvestCoordinator } from '../webview/harvestCoordinator';
 import { matchFieldsToProfile } from '../matcher';
-import { resolveLocally, resolveWithAi, isDropdown } from '../matcher/optionResolver';
+import { resolveLocally, resolveWithAi, DROPDOWN_WIDGET_NAMES } from '../matcher/optionResolver';
 import { generateText } from '../api/backend';
 import { loadProfile, addHistoryEntry, loadFieldCorrections, mergeFieldCorrections } from '../profile/store';
 import { enrichProfile } from '../profile/enrich';
@@ -229,7 +230,11 @@ export default function BrowserScreen({ route, navigation }) {
   const panelAnim = useRef(new Animated.Value(0)).current;
   const lastInjectedUrl = useRef('');
   const fieldsRef = useRef([]);
-  const harvestResolveRef = useRef(null);
+  // One coordinator per mounted screen. doAutofill is re-entrant (multi-step
+  // forms re-invoke it without awaiting a prior run), so a bare ref holding
+  // a single "resolve" would let a second run's harvest steal the first
+  // run's wakeup and strand it forever — see harvestCoordinator.js.
+  const harvestCoordinatorRef = useRef(createHarvestCoordinator());
 
   // Single entry point for scanner injection. Skips the scanner entirely on
   // Cloudflare interstitials — crawling / mutating the challenge page trips
@@ -401,6 +406,9 @@ export default function BrowserScreen({ route, navigation }) {
       const fastKeys = new Set(Object.values(fastMapping));
 
       let safeAiMapping = {};
+      // Hoisted (not just local to the `if` below) so the dropdown-harvest
+      // block further down can exclude fields this pass already resolved.
+      let aiLocalSelections = {};
 
       if (uncovered.length > 0) {
         try {
@@ -414,8 +422,7 @@ export default function BrowserScreen({ route, navigation }) {
 
           if (Object.keys(safeAiMapping).length > 0) {
             // Resolve dropdown options locally for AI-mapped fields too.
-            const { selections: aiLocalSelections } =
-              resolveLocally(uncovered, safeAiMapping, profile);
+            aiLocalSelections = resolveLocally(uncovered, safeAiMapping, profile).selections;
             webViewRef.current?.injectJavaScript(
               buildFillScript(safeAiMapping, JSON.stringify(profile), uncovered, aiLocalSelections)
             );
@@ -438,26 +445,26 @@ export default function BrowserScreen({ route, navigation }) {
       // Options for React-Select style comboboxes do not exist until the menu
       // is opened, so harvest them from the live page, then run the ordinary
       // local-then-AI resolution over fields that finally have options.
+      // Only fields NEITHER pass above already filled are harvested — a
+      // dropdown that Pass 1/2 already resolved is left alone here so a
+      // user's manual correction to it (made in the several seconds this
+      // await can take) is never silently overwritten.
       try {
         const combinedMapping = { ...fastMapping, ...safeAiMapping };
-        const DROPDOWN_WIDGETS = ['select', 'combobox-input', 'button-dropdown'];
         const dropdownIds = scanned
-          .filter(f => combinedMapping[f.id] && DROPDOWN_WIDGETS.includes(f.widget))
+          .filter(f =>
+            combinedMapping[f.id] &&
+            DROPDOWN_WIDGET_NAMES.includes(f.widget) &&
+            !localSelections[f.id] &&
+            !aiLocalSelections[f.id]
+          )
           .map(f => f.id);
 
         if (dropdownIds.length > 0) {
-          const harvested = await new Promise(resolve => {
-            harvestResolveRef.current = resolve;
-            webViewRef.current?.injectJavaScript(buildComboboxHarvestScript(dropdownIds));
-            // The page may never answer (navigation, a widget that will not
-            // open); do not leave autofill hanging on it.
-            setTimeout(() => {
-              if (harvestResolveRef.current === resolve) {
-                harvestResolveRef.current = null;
-                resolve({});
-              }
-            }, 8000);
-          });
+          const harvested = await harvestCoordinatorRef.current.startHarvest(
+            () => webViewRef.current?.injectJavaScript(buildComboboxHarvestScript(dropdownIds)),
+            8000
+          );
 
           // Attach the harvested options so isDropdown() finally passes.
           const withOptions = scanned
@@ -725,9 +732,7 @@ export default function BrowserScreen({ route, navigation }) {
       }
 
       if (data.type === 'COMBOBOX_OPTIONS') {
-        const resolve = harvestResolveRef.current;
-        harvestResolveRef.current = null;
-        if (resolve) resolve(data.options || {});
+        harvestCoordinatorRef.current.deliver(data.options);
       }
 
       if (data.type === 'USER_INPUT_DETECTED') {

@@ -8,9 +8,15 @@
 
 import { selectOptions } from '../api/backend';
 
-const DROPDOWN_WIDGETS = new Set(['select', 'button-dropdown', 'combobox-input']);
+// Single source of truth for which scanned-field widgets count as a
+// dropdown. Exported so BrowserScreen's pre-harvest widget filter (fields
+// don't have `options` populated yet, so `isDropdown` itself can't be used
+// there) stays in sync with this module instead of hand-copying the list.
+export const DROPDOWN_WIDGET_NAMES = ['select', 'button-dropdown', 'combobox-input'];
 
-export function isDropdown(field) {
+const DROPDOWN_WIDGETS = new Set(DROPDOWN_WIDGET_NAMES);
+
+function isDropdown(field) {
   return !!field && DROPDOWN_WIDGETS.has(field.widget) &&
     Array.isArray(field.options) && field.options.length > 0;
 }
