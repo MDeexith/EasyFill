@@ -1,4 +1,9 @@
-import { EMPTY_PROFILE, PROFILE_FIELD_LABELS, mergeWithSchema } from '../src/profile/schema';
+import {
+  EMPTY_PROFILE,
+  PROFILE_FIELD_LABELS,
+  PROFILE_EDITOR_SECTIONS,
+  mergeWithSchema,
+} from '../src/profile/schema';
 
 describe('profile schema', () => {
   const NEW_KEYS = [
@@ -53,5 +58,55 @@ describe('mergeWithSchema', () => {
   test('tolerates null and undefined', () => {
     expect(mergeWithSchema(null).firstName).toBe('');
     expect(mergeWithSchema(undefined).email).toBe('');
+  });
+});
+
+// C2: App.jsx gates ApplicationDetailsScreen behind the onboarding stack,
+// which is only entered when isOnboarded() is false. Every existing Play Store
+// user is already onboarded, so if a key is not in the Profile editor there is
+// no route by which they can ever set it.
+describe('PROFILE_EDITOR_SECTIONS', () => {
+  const NEW_KEYS = [
+    'authorizedToWork',
+    'requiresSponsorship',
+    'heardAboutUs',
+    'gender',
+    'hispanicLatino',
+    'veteranStatus',
+    'disabilityStatus',
+  ];
+  const allFields = PROFILE_EDITOR_SECTIONS.flatMap(s => s.fields);
+
+  test('exposes every key an already-onboarded user would otherwise never reach', () => {
+    for (const key of NEW_KEYS) {
+      expect(allFields).toContain(key);
+    }
+  });
+
+  test('groups the four EEO keys into one clearly-labelled section', () => {
+    const eeo = PROFILE_EDITOR_SECTIONS.find(s => /equal opportunity/i.test(s.title));
+    expect(eeo).toBeDefined();
+    expect(eeo.fields.sort()).toEqual(
+      ['disabilityStatus', 'gender', 'hispanicLatino', 'veteranStatus'].sort()
+    );
+    // The section must say what happens to these values — they are the ones
+    // the app is contractually forbidden from sending to the backend.
+    expect(eeo.note).toMatch(/device/i);
+  });
+
+  test('every editor field is a real profile key', () => {
+    for (const key of allFields) {
+      expect(Object.prototype.hasOwnProperty.call(EMPTY_PROFILE, key)).toBe(true);
+    }
+  });
+
+  test('every editor field has a human label', () => {
+    for (const key of allFields) {
+      expect(typeof PROFILE_FIELD_LABELS[key]).toBe('string');
+    }
+  });
+
+  test('no key appears in two sections (one input, one source of truth)', () => {
+    expect(new Set(allFields).size).toBe(allFields.length);
   });
 });

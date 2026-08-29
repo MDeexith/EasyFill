@@ -33,9 +33,17 @@ function Choice({ label, options, value, onChange }) {
   );
 }
 
-export default function ApplicationDetailsScreen({ navigation }) {
+export default function ApplicationDetailsScreen({ navigation, route }) {
+  // Reached two ways: as the last step of onboarding (Upload -> Confirm ->
+  // here), or from the Profile tab by an already-onboarded user. Onboarding
+  // must replace('Main') because there is no Main below it on the stack yet;
+  // a visit from Profile must go BACK, or it would strand the user on a fresh
+  // Main and lose the tab they came from.
+  const fromProfile = route?.params?.from === 'profile';
   const [profile, setProfile] = useState(() => loadProfile());
-  const [eeoOpen, setEeoOpen] = useState(false);
+  // Already-onboarded users are editing existing answers, so show them
+  // rather than hiding them behind "Answer them instead".
+  const [eeoOpen, setEeoOpen] = useState(fromProfile);
 
   const set = useCallback((key, value) => {
     setProfile(p => ({ ...p, [key]: value }));
@@ -51,14 +59,19 @@ export default function ApplicationDetailsScreen({ navigation }) {
       disabilityStatus: profile.disabilityStatus || DECLINE,
     };
     saveProfile(next);
+    if (fromProfile) {
+      if (navigation.canGoBack()) navigation.goBack();
+      else navigation.replace('Main');
+      return;
+    }
     setOnboarded(true);
     navigation.replace('Main');
-  }, [profile, navigation]);
+  }, [profile, navigation, fromProfile]);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <ScrollView contentContainerStyle={styles.scroll}>
-        <Eyebrow>ONE-TIME SETUP</Eyebrow>
+        <Eyebrow>{fromProfile ? 'APPLICATION QUESTIONS' : 'ONE-TIME SETUP'}</Eyebrow>
         <Text style={T.h1}>A few things your résumé doesn't say</Text>
         <Text style={styles.sub}>
           Applications ask these constantly. Answer once and EasyFill fills them every time.
@@ -120,9 +133,9 @@ export default function ApplicationDetailsScreen({ navigation }) {
           )}
         </Card>
 
-        <Btn onPress={finish}>Done</Btn>
+        <Btn onPress={finish}>{fromProfile ? 'Save' : 'Done'}</Btn>
         <TouchableOpacity onPress={finish} style={styles.skip} activeOpacity={0.7}>
-          <Text style={styles.skipText}>Skip for now</Text>
+          <Text style={styles.skipText}>{fromProfile ? 'Back to profile' : 'Skip for now'}</Text>
         </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>
