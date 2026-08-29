@@ -663,6 +663,7 @@ export function buildFillScript(mapping, profileJson, fields, optionSelections =
   var CHIP_KEYS = { skills: true, languages: true };
 
   var filled = 0;
+  var outcomes = {};
   Object.keys(mapping).forEach(function(fieldId) {
     var profileKey = mapping[fieldId];
     if (!profileKey) return;
@@ -678,35 +679,41 @@ export function buildFillScript(mapping, profileJson, fields, optionSelections =
     if (optionSelections[fieldId] !== undefined && optionSelections[fieldId] !== null && optionSelections[fieldId] !== '') {
       val = optionSelections[fieldId];
     }
-    if (val === undefined || val === null || val === '') return;
+    if (val === undefined || val === null || val === '') { outcomes[fieldId] = 'no-value'; return; }
 
     // Radio / checkbox group: routed via options[], not a single el.
     var meta = groupMeta[fieldId];
     if (meta && meta.widget === 'radio-group') {
-      if (fillRadioGroup(meta.options, val)) filled++;
+      if (fillRadioGroup(meta.options, val)) { filled++; outcomes[fieldId] = 'filled'; }
+      else outcomes[fieldId] = 'control-failed';
       return;
     }
     if (meta && meta.widget === 'checkbox-group') {
-      if (fillCheckboxGroup(meta.options, val)) filled++;
+      if (fillCheckboxGroup(meta.options, val)) { filled++; outcomes[fieldId] = 'filled'; }
+      else outcomes[fieldId] = 'control-failed';
       return;
     }
 
     var el = findEl(fieldId);
-    if (!el) return;
+    if (!el) { outcomes[fieldId] = 'control-failed'; return; }
 
     if (CHIP_KEYS[profileKey] && (el.getAttribute('role') === 'combobox' ||
         el.getAttribute('aria-haspopup') === 'listbox')) {
       var values = String(val).split(',').map(function(s) { return s.trim(); }).filter(Boolean);
       fillChips(el, values);
       filled++;
+      outcomes[fieldId] = 'filled';
       return;
     }
 
-    if (fillOne(el, val)) filled++;
+    if (fillOne(el, val)) { filled++; outcomes[fieldId] = 'filled'; }
+    else outcomes[fieldId] = 'control-failed';
   });
 
   if (window.ReactNativeWebView) {
-    window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'FILL_COMPLETE', filled: filled }));
+    window.ReactNativeWebView.postMessage(JSON.stringify({
+      type: 'FILL_COMPLETE', filled: filled, outcomes: outcomes
+    }));
   }
 })();
   `;

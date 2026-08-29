@@ -174,6 +174,7 @@ export default function BrowserScreen({ route, navigation }) {
   const [tracked, setTracked] = useState(false);
   const [webViewCanGoBack, setWebViewCanGoBack] = useState(false);
   const [fillStats, setFillStats] = useState({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+  const [fillOutcomes, setFillOutcomes] = useState({});
   const [pendingCorrections, setPendingCorrections] = useState({});
   const [multiStepActive, setMultiStepActive] = useState(false);
   const [stepCount, setStepCount] = useState(1);
@@ -679,6 +680,7 @@ export default function BrowserScreen({ route, navigation }) {
       if (data.type === 'FILL_COMPLETE') {
         const n = data.filled ?? 0;
         setFilledCount(prev => prev + n);
+        setFillOutcomes(prev => ({ ...prev, ...(data.outcomes || {}) }));
         setTracked(prev => {
           if (!prev && n > 0) {
             addHistoryEntry({
@@ -794,6 +796,7 @@ export default function BrowserScreen({ route, navigation }) {
             setLoading(true);
             setFields([]);
             setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+            setFillOutcomes({});
             setPendingCorrections({});
             // Preserve 'ats-loading' so the user sees the "Opening application
             // form…" banner uninterrupted across the parent→embed navigation.
@@ -817,6 +820,7 @@ export default function BrowserScreen({ route, navigation }) {
               setPhase(prev => prev === 'ats-loading' ? prev : 'loading');
               setFields([]);
               setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+              setFillOutcomes({});
               setPendingCorrections({});
               // Reset ATS loop guard when hostname changes so a new job page on the
               // same company's ATS gets a fresh transform attempt.
