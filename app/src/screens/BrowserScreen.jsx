@@ -20,9 +20,9 @@ import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
 import { FORM_SCANNER_JS } from '../webview/formScanner';
 
-import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript } from '../webview/filler';
+import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript, buildComboboxHarvestScript } from '../webview/filler';
 import { matchFieldsToProfile } from '../matcher';
-import { resolveLocally, resolveWithAi } from '../matcher/optionResolver';
+import { resolveLocally, resolveWithAi, isDropdown } from '../matcher/optionResolver';
 import { generateText } from '../api/backend';
 import { loadProfile, addHistoryEntry, loadFieldCorrections, mergeFieldCorrections } from '../profile/store';
 import { enrichProfile } from '../profile/enrich';
@@ -229,6 +229,7 @@ export default function BrowserScreen({ route, navigation }) {
   const panelAnim = useRef(new Animated.Value(0)).current;
   const lastInjectedUrl = useRef('');
   const fieldsRef = useRef([]);
+  const harvestResolveRef = useRef(null);
 
   // Single entry point for scanner injection. Skips the scanner entirely on
   // Cloudflare interstitials — crawling / mutating the challenge page trips
@@ -377,7 +378,7 @@ export default function BrowserScreen({ route, navigation }) {
 
       // Resolve dropdown options locally (no AI) so the fast pass fills the
       // correct option (e.g. profile "USA" -> option "United States").
-      const { selections: localSelections, unresolved: fastDropdownsForAi } =
+      const { selections: localSelections } =
         resolveLocally(scanned, fastMapping, profile);
 
       webViewRef.current?.injectJavaScript(
@@ -400,7 +401,6 @@ export default function BrowserScreen({ route, navigation }) {
       const fastKeys = new Set(Object.values(fastMapping));
 
       let safeAiMapping = {};
-      let aiDropdownsForAi = [];
 
       if (uncovered.length > 0) {
         try {
@@ -414,9 +414,8 @@ export default function BrowserScreen({ route, navigation }) {
 
           if (Object.keys(safeAiMapping).length > 0) {
             // Resolve dropdown options locally for AI-mapped fields too.
-            const { selections: aiLocalSelections, unresolved } =
+            const { selections: aiLocalSelections } =
               resolveLocally(uncovered, safeAiMapping, profile);
-            aiDropdownsForAi = unresolved;
             webViewRef.current?.injectJavaScript(
               buildFillScript(safeAiMapping, JSON.stringify(profile), uncovered, aiLocalSelections)
             );
@@ -435,21 +434,53 @@ export default function BrowserScreen({ route, navigation }) {
         }
       }
 
-      // ── Dropdown option AI resolution ───────────────────────────────────
-      // For dropdowns whose option couldn't be matched locally, ask the LLM to
-      // pick the best option (e.g. "USA" -> "United States", "4" -> "3-5 years")
-      // and inject a dropdown-only fill. Runs in the background after the fast
-      // pass, mirroring the AI key-matching pass.
+      // ── Dropdown resolution ─────────────────────────────────────────────
+      // Options for React-Select style comboboxes do not exist until the menu
+      // is opened, so harvest them from the live page, then run the ordinary
+      // local-then-AI resolution over fields that finally have options.
       try {
-        const dropdownsForAi = fastDropdownsForAi.concat(aiDropdownsForAi);
-        if (dropdownsForAi.length > 0) {
-          const combinedMapping = { ...fastMapping, ...safeAiMapping };
-          const aiSelections = await resolveWithAi(dropdownsForAi, combinedMapping, profile);
-          if (Object.keys(aiSelections).length > 0) {
-            webViewRef.current?.injectJavaScript(buildDirectFillScript(aiSelections));
+        const combinedMapping = { ...fastMapping, ...safeAiMapping };
+        const DROPDOWN_WIDGETS = ['select', 'combobox-input', 'button-dropdown'];
+        const dropdownIds = scanned
+          .filter(f => combinedMapping[f.id] && DROPDOWN_WIDGETS.includes(f.widget))
+          .map(f => f.id);
+
+        if (dropdownIds.length > 0) {
+          const harvested = await new Promise(resolve => {
+            harvestResolveRef.current = resolve;
+            webViewRef.current?.injectJavaScript(buildComboboxHarvestScript(dropdownIds));
+            // The page may never answer (navigation, a widget that will not
+            // open); do not leave autofill hanging on it.
+            setTimeout(() => {
+              if (harvestResolveRef.current === resolve) {
+                harvestResolveRef.current = null;
+                resolve({});
+              }
+            }, 8000);
+          });
+
+          // Attach the harvested options so isDropdown() finally passes.
+          const withOptions = scanned
+            .filter(f => harvested[f.id] && harvested[f.id].length > 0)
+            .map(f => ({ ...f, options: harvested[f.id] }));
+
+          const { selections, unresolved } =
+            resolveLocally(withOptions, combinedMapping, profile);
+
+          if (Object.keys(selections).length > 0) {
+            webViewRef.current?.injectJavaScript(buildDirectFillScript(selections));
+          }
+
+          if (unresolved.length > 0) {
+            const aiSelections = await resolveWithAi(unresolved, combinedMapping, profile);
+            if (Object.keys(aiSelections).length > 0) {
+              webViewRef.current?.injectJavaScript(buildDirectFillScript(aiSelections));
+            }
           }
         }
-      } catch { /* dropdown AI resolution failed — local selections stand */ }
+      } catch (err) {
+        console.warn('[autofill] dropdown resolution failed:', err?.message || err);
+      }
 
       // Apply saved corrections for fields the profile didn't cover
       const corrections = loadFieldCorrections();
@@ -691,6 +722,12 @@ export default function BrowserScreen({ route, navigation }) {
             inputs: data.inputCount,
           }));
         } catch (e) {}
+      }
+
+      if (data.type === 'COMBOBOX_OPTIONS') {
+        const resolve = harvestResolveRef.current;
+        harvestResolveRef.current = null;
+        if (resolve) resolve(data.options || {});
       }
 
       if (data.type === 'USER_INPUT_DETECTED') {

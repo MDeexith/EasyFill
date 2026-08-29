@@ -10,7 +10,7 @@ import { selectOptions } from '../api/backend';
 
 const DROPDOWN_WIDGETS = new Set(['select', 'button-dropdown', 'combobox-input']);
 
-function isDropdown(field) {
+export function isDropdown(field) {
   return !!field && DROPDOWN_WIDGETS.has(field.widget) &&
     Array.isArray(field.options) && field.options.length > 0;
 }
