@@ -542,6 +542,90 @@ export function buildDirectFillScript(valuesById) {
   `;
 }
 
+// Opens each combobox in turn and reports the options its listbox renders.
+//
+// React-Select and similar widgets create their listbox only on open, so the
+// options simply do not exist at scan time — this is why resolveLocally skipped
+// these fields entirely (isDropdown requires a non-empty options array).
+// Opening is serial because focusing one combobox closes another.
+export function buildComboboxHarvestScript(fieldIds) {
+  return `
+(function() {
+  var ids = ${safeJson(fieldIds || [])};
+  var results = {};
+
+  function findEl(afId) {
+    try { return document.querySelector('[data-af-id="' + afId + '"]'); }
+    catch (e) { return null; }
+  }
+
+  function readOptions(el) {
+    var out = [];
+    var controls = el.getAttribute('aria-controls');
+    var listbox = null;
+    if (controls) { try { listbox = document.getElementById(controls); } catch (e) {} }
+    if (!listbox) listbox = document.querySelector('[role="listbox"]');
+    if (!listbox) return out;
+    var nodes = listbox.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], li');
+    for (var i = 0; i < nodes.length; i++) {
+      var label = (nodes[i].innerText || nodes[i].textContent || '').trim();
+      if (!label) continue;
+      out.push({ value: nodes[i].getAttribute('data-value') || label, label: label });
+    }
+    return out;
+  }
+
+  function closeAny(el) {
+    try {
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+      el.blur();
+    } catch (e) {}
+  }
+
+  function step(i) {
+    if (i >= ids.length) {
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'COMBOBOX_OPTIONS', options: results
+        }));
+      }
+      return;
+    }
+    var afId = ids[i];
+    var el = findEl(afId);
+    if (!el) { step(i + 1); return; }
+
+    // Native <select> already carries its options; no need to open anything.
+    if (el.tagName === 'SELECT' && el.options) {
+      var nat = [];
+      for (var k = 0; k < el.options.length; k++) {
+        nat.push({ value: el.options[k].value, label: (el.options[k].text || '').trim() });
+      }
+      results[afId] = nat;
+      step(i + 1);
+      return;
+    }
+
+    try {
+      el.focus();
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
+    } catch (e) {}
+
+    // Give the widget time to render its listbox before reading it.
+    setTimeout(function() {
+      var opts = readOptions(el);
+      if (opts.length) results[afId] = opts;
+      closeAny(el);
+      setTimeout(function() { step(i + 1); }, 60);
+    }, 300);
+  }
+
+  step(0);
+})();
+  `;
+}
+
 // Build a compact map of group-style fields keyed by af-id so the runtime
 // can route radio-group / checkbox-group fills (which need options[]).
 function buildGroupMeta(fields) {
