@@ -45,6 +45,18 @@ function findEl(id) {
   return null;
 }
 
+// Stamp an element the moment WE are about to change it, so the correction
+// listener can tell our own synthetic input/change events from a real user
+// edit. A window rather than a flag because the async widget paths
+// (tryButtonDropdownFill, tryPlacesComboboxFill, tryComboboxFill) dispatch
+// seconds after fillOne returns, and because the events that finally fire are
+// often dispatched by the PAGE's own handlers reacting to our click, not by us.
+// Element-scoped rather than global, so a genuine edit to a different field
+// during a fill is still learned.
+function afMarkFilled(el) {
+  try { if (el) el.__afFilledAt = Date.now(); } catch (e) {}
+}
+
 function isContentEditable(el) {
   if (!el || el.nodeType !== 1) return false;
   var ce = el.getAttribute && el.getAttribute('contenteditable');
@@ -194,6 +206,7 @@ function clickCheckable(el, shouldBeChecked) {
   // Set checked state imperatively, then dispatch the events React/Vue
   // listen to. click() alone toggles unpredictably when state already matches.
   if (!el) return false;
+  afMarkFilled(el);
   try {
     if (typeof shouldBeChecked === 'boolean' && el.checked === shouldBeChecked) {
       // Already in target state; still fire change so any onChange runs.
@@ -458,6 +471,7 @@ function tryComboboxFill(el, value) {
 }
 
 function fillChips(el, values) {
+  afMarkFilled(el);
   fireFocus(el);
   var setter = nativeSetter(el);
   for (var i = 0; i < values.length; i++) {
@@ -474,6 +488,7 @@ function fillChips(el, values) {
 
 function fillOne(el, value) {
   if (!el) return false;
+  afMarkFilled(el);
   var strVal = String(value);
 
   // No-op kept so existing call sites stay untouched; visual highlight removed.
@@ -842,23 +857,57 @@ export function buildFillScript(mapping, profileJson, fields, optionSelections =
   `;
 }
 
+// How long after WE touched an element its input/change events are treated as
+// ours rather than the user's. Covers the slowest async fill path
+// (tryButtonDropdownFill: waitForListbox 12 x 150ms, then a click the page
+// reacts to). Nothing is lost by being generous: an element inside this window
+// was, by definition, just auto-filled, and BrowserScreen already discards
+// USER_INPUT_DETECTED for auto-filled fields.
+const SYNTHETIC_FILL_WINDOW_MS = 5000;
+
+// `filledAfIds` is merged into a page-level set rather than closed over, and
+// re-injection updates that set even though the DOM listeners are installed
+// only once. Passing a fresh snapshot on each pass is how the AI pass,
+// dropdown-resolution pass, correction replay and AI drafts get represented —
+// previously only the fast pass's ids were ever known.
 export function buildCorrectionListenerScript(filledAfIds) {
   const filledMap = Object.fromEntries((filledAfIds || []).map(id => [id, true]));
   return `
 (function() {
+  var incoming = ${safeJson(filledMap)};
+  if (!window.__AF_FILLED_IDS__) window.__AF_FILLED_IDS__ = {};
+  var incomingKeys = Object.keys(incoming);
+  for (var n = 0; n < incomingKeys.length; n++) {
+    window.__AF_FILLED_IDS__[incomingKeys[n]] = true;
+  }
+  // Listeners are capture-phase and global; installing them twice would double
+  // every report. The id set above is refreshed on every injection regardless.
   if (window.__AF_CORRECTION_LISTENER__) return;
   window.__AF_CORRECTION_LISTENER__ = true;
-  var filled = ${safeJson(filledMap)};
+
+  // setSelectVal, clickCheckable and setNativeInput all dispatch synthetic
+  // 'change' events while filling, and this listener is capture-phase, so it
+  // saw every one of them as a user correction — then replayed them onto
+  // future forms. The wasAutoFilled guard did not cover it: that only knew the
+  // fast pass's ids, and on a re-entrant run the __AF_CORRECTION_LISTENER__
+  // guard meant the already-installed listener never learned the new ones.
+  function isSyntheticFill(el) {
+    try {
+      var t = el && el.__afFilledAt;
+      return !!t && (Date.now() - t) < ${SYNTHETIC_FILL_WINDOW_MS};
+    } catch (e) { return false; }
+  }
 
   function report(el, value) {
     var afId = el.getAttribute && el.getAttribute('data-af-id');
     if (!afId || !value) return;
+    if (isSyntheticFill(el)) return;
     if (window.ReactNativeWebView) {
       window.ReactNativeWebView.postMessage(JSON.stringify({
         type: 'USER_INPUT_DETECTED',
         afId: afId,
         value: value,
-        wasAutoFilled: !!filled[afId],
+        wasAutoFilled: !!(window.__AF_FILLED_IDS__ && window.__AF_FILLED_IDS__[afId]),
       }));
     }
   }

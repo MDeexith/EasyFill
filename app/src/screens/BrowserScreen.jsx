@@ -382,6 +382,12 @@ export default function BrowserScreen({ route, navigation }) {
     if (Object.keys(drafts).length > 0) {
       const script = buildDirectFillScript(drafts);
       webViewRef.current?.injectJavaScript(script);
+      // Drafts land after doAutofill already installed the listener, so tell
+      // the (already-installed) listener about them — otherwise a generated
+      // cover letter blurring out reads as a user-authored correction.
+      webViewRef.current?.injectJavaScript(
+        buildCorrectionListenerScript(Object.keys(drafts))
+      );
       // Fallback: AI_FILL_COMPLETE message sets phase, but guard against it not firing
       setTimeout(() => setPhase(p => p === 'drafting' ? 'filled' : p), 5000);
     } else {
@@ -487,6 +493,10 @@ export default function BrowserScreen({ route, navigation }) {
       // dropdown that Pass 1/2 already resolved is left alone here so a
       // user's manual correction to it (made in the several seconds this
       // await can take) is never silently overwritten.
+      // Ids the dropdown-resolution pass wrote to, hoisted so the correction
+      // listener below can be told about them.
+      const dropdownFilledIds = [];
+
       try {
         const combinedMapping = { ...fastMapping, ...safeAiMapping };
         const dropdownIds = scanned
@@ -518,12 +528,14 @@ export default function BrowserScreen({ route, navigation }) {
             resolveLocally(withOptions, combinedMapping, profile);
 
           if (Object.keys(selections).length > 0) {
+            dropdownFilledIds.push(...Object.keys(selections));
             webViewRef.current?.injectJavaScript(buildDirectFillScript(selections));
           }
 
           if (unresolved.length > 0) {
             const aiSelections = await resolveWithAi(unresolved, combinedMapping, profile);
             if (Object.keys(aiSelections).length > 0) {
+              dropdownFilledIds.push(...Object.keys(aiSelections));
               webViewRef.current?.injectJavaScript(buildDirectFillScript(aiSelections));
             }
           }
@@ -551,8 +563,21 @@ export default function BrowserScreen({ route, navigation }) {
         webViewRef.current?.injectJavaScript(buildDirectFillScript(correctionFills));
       }
 
+      // Every id this run actually wrote to, not just the fast pass's. The old
+      // Object.keys(fastMapping) both over-claimed (ids mapped to an empty key
+      // that filled nothing) and under-claimed (everything the AI pass, the
+      // dropdown-resolution pass and the correction replay filled), so
+      // wasAutoFilled was wrong in both directions.
+      const filledAfIds = [
+        ...Object.keys(fastMapping).filter(
+          id => hasUsableProfileValue(profile, fastMapping[id])
+        ),
+        ...Object.keys(safeAiMapping),
+        ...dropdownFilledIds,
+        ...Object.keys(correctionFills),
+      ];
       webViewRef.current?.injectJavaScript(
-        buildCorrectionListenerScript(Object.keys(fastMapping))
+        buildCorrectionListenerScript([...new Set(filledAfIds)])
       );
 
       setMultiStepActive(true);
