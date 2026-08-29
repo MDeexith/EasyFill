@@ -250,6 +250,12 @@ export default function BrowserScreen({ route, navigation }) {
   // 1's harvest with {}, injected a second harvest script over the first, and
   // delivered run 1's COMBOBOX_OPTIONS into run 2's slot.
   const autofillInFlightRef = useRef(false);
+  // A re-entrant call is queued, not dropped. Multi-step forms legitimately
+  // re-invoke doAutofill (FIELDS_SCANNED / FIELDS_UPDATED on a 600ms timer)
+  // and mark the URL as filled BEFORE calling, so simply returning would mean
+  // that step is never filled at all. Last call wins; drained in the finally.
+  const pendingAutofillRef = useRef(null);
+  const doAutofillRef = useRef(null);
 
   // Single entry point for scanner injection. Skips the scanner entirely on
   // Cloudflare interstitials — crawling / mutating the challenge page trips
@@ -399,7 +405,8 @@ export default function BrowserScreen({ route, navigation }) {
   // Pass 1 (cache + regex) injects immediately; Pass 2 (AI) fills remaining in background.
   const doAutofill = useCallback(async (scanned) => {
     if (autofillInFlightRef.current) {
-      console.warn('[autofill] run already in flight — ignoring re-entrant call');
+      console.warn('[autofill] run already in flight — queueing this call');
+      pendingAutofillRef.current = scanned;
       return;
     }
     autofillInFlightRef.current = true;
@@ -493,8 +500,9 @@ export default function BrowserScreen({ route, navigation }) {
       // dropdown that Pass 1/2 already resolved is left alone here so a
       // user's manual correction to it (made in the several seconds this
       // await can take) is never silently overwritten.
-      // Ids the dropdown-resolution pass wrote to, hoisted so the correction
-      // listener below can be told about them.
+      //
+      // Hoisted out of the try so the correction listener below can be told
+      // which ids this pass wrote to.
       const dropdownFilledIds = [];
 
       try {
@@ -593,8 +601,16 @@ export default function BrowserScreen({ route, navigation }) {
       setPhase('detected');
     } finally {
       autofillInFlightRef.current = false;
+      const queued = pendingAutofillRef.current;
+      pendingAutofillRef.current = null;
+      // Drained via a ref so the retry doesn't make doAutofill a dependency
+      // of itself. Cleared before the retry runs, so a queued run cannot
+      // re-queue itself into a loop.
+      if (queued) setTimeout(() => doAutofillRef.current?.(queued), 300);
     }
   }, [doAiDraft]);
+
+  useEffect(() => { doAutofillRef.current = doAutofill; }, [doAutofill]);
 
   const manualRescan = useCallback(() => {
     setPhase('loading');
