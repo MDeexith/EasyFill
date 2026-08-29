@@ -65,7 +65,12 @@ export default function UploadScreen({ navigation }) {
       sparkleScale.setValue(1);
       if (state === 'idle') progressWidth.setValue(0);
     }
-  }, [state]);
+    // progressWidth / sparkleOpacity / sparkleScale are `useRef(...).current`
+    // Animated.Values: stable for the component's lifetime, so listing them
+    // changes nothing at runtime — it only satisfies exhaustive-deps, which
+    // was the one lint ERROR in the repo and blocked `npm run lint` from
+    // exiting 0.
+  }, [state, progressWidth, sparkleOpacity, sparkleScale]);
 
   const doPick = useCallback(async () => {
     try {
