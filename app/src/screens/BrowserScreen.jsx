@@ -20,7 +20,7 @@ import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
 import { FORM_SCANNER_JS } from '../webview/formScanner';
 
-import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript, buildComboboxHarvestScript } from '../webview/filler';
+import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript, buildComboboxHarvestScript, mergeFillOutcomes } from '../webview/filler';
 import { createHarvestCoordinator } from '../webview/harvestCoordinator';
 import { matchFieldsToProfile } from '../matcher';
 import { resolveLocally, resolveWithAi, DROPDOWN_WIDGET_NAMES } from '../matcher/optionResolver';
@@ -680,7 +680,7 @@ export default function BrowserScreen({ route, navigation }) {
       if (data.type === 'FILL_COMPLETE') {
         const n = data.filled ?? 0;
         setFilledCount(prev => prev + n);
-        setFillOutcomes(prev => ({ ...prev, ...(data.outcomes || {}) }));
+        setFillOutcomes(prev => mergeFillOutcomes(prev, data.outcomes));
         setTracked(prev => {
           if (!prev && n > 0) {
             addHistoryEntry({
@@ -701,6 +701,7 @@ export default function BrowserScreen({ route, navigation }) {
       if (data.type === 'AI_FILL_COMPLETE') {
         const n = data.filled ?? 0;
         setFilledCount(prev => prev + n);
+        setFillOutcomes(prev => mergeFillOutcomes(prev, data.outcomes));
         setPhase(prev => prev === 'drafting' ? 'filled' : prev);
       }
 

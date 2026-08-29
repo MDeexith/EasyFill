@@ -1,4 +1,4 @@
-import { buildFillScript } from '../src/webview/filler';
+import { buildFillScript, buildDirectFillScript, mergeFillOutcomes } from '../src/webview/filler';
 
 describe('buildFillScript outcome reporting', () => {
   const fields = [{ id: 'af_1', name: 'email', widget: 'text' }];
@@ -17,51 +17,51 @@ describe('buildFillScript outcome reporting', () => {
   });
 });
 
-// Behavioural coverage: execute the generated script against a hand-rolled
-// fake DOM (same approach as __tests__/correctionListener.test.js) and
-// assert the *actual* outcomes map the runtime produces, not just that the
-// script text mentions the right strings.
+// Hand-rolled fake DOM (same approach as __tests__/correctionListener.test.js),
+// shared by the buildFillScript and buildDirectFillScript behavioural suites
+// below so both execute the actual generated scripts and assert on the real
+// outcomes map produced, not just on script text.
+function createFakeDOM(elementsByAfId = {}) {
+  const messages = [];
+  const fakeDocument = {
+    querySelector(selector) {
+      const m = /\[data-af-id="([^"]+)"\]/.exec(selector || '');
+      if (m && elementsByAfId[m[1]]) return elementsByAfId[m[1]];
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    getElementsByTagName() {
+      return [];
+    },
+  };
+  const fakeWindow = {
+    // nativeSetter() reads these off `window`; a bare prototype object
+    // with no `value` descriptor makes it fall back to plain assignment.
+    HTMLInputElement: { prototype: {} },
+    HTMLTextAreaElement: { prototype: {} },
+    ReactNativeWebView: {
+      postMessage(msg) {
+        messages.push(JSON.parse(msg));
+      },
+    },
+  };
+  return { fakeDocument, fakeWindow, messages };
+}
+
+function fakeElement(attrs = {}) {
+  return {
+    getAttribute(name) {
+      return attrs[name] !== undefined ? attrs[name] : null;
+    },
+    dispatchEvent() {},
+    focus() {},
+    ...attrs,
+  };
+}
+
 describe('buildFillScript outcome reporting - runtime behavior', () => {
-  function createFakeDOM(elementsByAfId = {}) {
-    const messages = [];
-    const fakeDocument = {
-      querySelector(selector) {
-        const m = /\[data-af-id="([^"]+)"\]/.exec(selector || '');
-        if (m && elementsByAfId[m[1]]) return elementsByAfId[m[1]];
-        return null;
-      },
-      querySelectorAll() {
-        return [];
-      },
-      getElementsByTagName() {
-        return [];
-      },
-    };
-    const fakeWindow = {
-      // nativeSetter() reads these off `window`; a bare prototype object
-      // with no `value` descriptor makes it fall back to plain assignment.
-      HTMLInputElement: { prototype: {} },
-      HTMLTextAreaElement: { prototype: {} },
-      ReactNativeWebView: {
-        postMessage(msg) {
-          messages.push(JSON.parse(msg));
-        },
-      },
-    };
-    return { fakeDocument, fakeWindow, messages };
-  }
-
-  function fakeElement(attrs = {}) {
-    return {
-      getAttribute(name) {
-        return attrs[name] !== undefined ? attrs[name] : null;
-      },
-      dispatchEvent() {},
-      focus() {},
-      ...attrs,
-    };
-  }
-
   function run(mapping, profile, fields, optionSelections = {}) {
     const script = buildFillScript(mapping, JSON.stringify(profile), fields, optionSelections);
     return script;
@@ -151,5 +151,89 @@ describe('buildFillScript outcome reporting - runtime behavior', () => {
       af_2: 'control-failed',
       af_3: 'no-value',
     });
+  });
+});
+
+// buildDirectFillScript is what the dropdown-resolution pass (and the AI
+// draft-fill and saved-corrections passes) inject after the fast/AI passes
+// already ran buildFillScript once. Its outcomes must be just as real, since
+// this is precisely the pass that turns an earlier 'control-failed' verdict
+// on a dropdown into an actual fill.
+describe('buildDirectFillScript outcome reporting - runtime behavior', () => {
+  test('a field whose element exists and accepts the value is reported as filled', () => {
+    const { fakeDocument, fakeWindow, messages } = createFakeDOM({
+      af_1: fakeElement({ tagName: 'INPUT', value: '' }),
+    });
+
+    const script = buildDirectFillScript({ af_1: 'United States' });
+    // eslint-disable-next-line no-new-func
+    new Function('document', 'window', script)(fakeDocument, fakeWindow);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].type).toBe('AI_FILL_COMPLETE');
+    expect(messages[0].filled).toBe(1);
+    expect(messages[0].outcomes).toEqual({ af_1: 'filled' });
+  });
+
+  test('a field whose element is absent from the DOM is reported as control-failed', () => {
+    const { fakeDocument, fakeWindow, messages } = createFakeDOM({});
+
+    const script = buildDirectFillScript({ af_1: 'United States' });
+    // eslint-disable-next-line no-new-func
+    new Function('document', 'window', script)(fakeDocument, fakeWindow);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].filled).toBe(0);
+    expect(messages[0].outcomes).toEqual({ af_1: 'control-failed' });
+  });
+
+  test('existing filled count and message type are preserved unchanged', () => {
+    // Guards against the "only ADD outcomes" requirement regressing: nothing
+    // that already consumes AI_FILL_COMPLETE (e.g. the drafting-phase
+    // fallback in BrowserScreen) should see its shape change.
+    const { fakeDocument, fakeWindow, messages } = createFakeDOM({
+      af_1: fakeElement({ tagName: 'INPUT', value: '' }),
+      af_2: fakeElement({ tagName: 'INPUT', value: '' }),
+    });
+
+    const script = buildDirectFillScript({ af_1: 'a', af_2: 'b' });
+    // eslint-disable-next-line no-new-func
+    new Function('document', 'window', script)(fakeDocument, fakeWindow);
+
+    expect(Object.keys(messages[0]).sort()).toEqual(['filled', 'outcomes', 'type']);
+    expect(messages[0].type).toBe('AI_FILL_COMPLETE');
+    expect(messages[0].filled).toBe(2);
+  });
+});
+
+// mergeFillOutcomes is the pure helper BrowserScreen uses to fold each
+// FILL_COMPLETE / AI_FILL_COMPLETE message into cumulative state. Tested
+// directly (not through the component) because the property that matters —
+// a later pass's verdict overwrites an earlier one for the same af-id — is
+// a pure-data guarantee, independent of React or the WebView bridge.
+describe('mergeFillOutcomes', () => {
+  test('a later "filled" verdict overwrites an earlier "control-failed" for the same field', () => {
+    const afterFastPass = { af_1: 'control-failed' };
+    const afterDropdownPass = { af_1: 'filled' };
+
+    expect(mergeFillOutcomes(afterFastPass, afterDropdownPass)).toEqual({ af_1: 'filled' });
+  });
+
+  test('fields absent from the incoming map keep their prior verdict', () => {
+    const prev = { af_1: 'filled', af_2: 'no-value' };
+    const incoming = { af_3: 'control-failed' };
+
+    expect(mergeFillOutcomes(prev, incoming)).toEqual({
+      af_1: 'filled',
+      af_2: 'no-value',
+      af_3: 'control-failed',
+    });
+  });
+
+  test('tolerates a missing or undefined incoming outcomes map', () => {
+    const prev = { af_1: 'filled' };
+
+    expect(mergeFillOutcomes(prev, undefined)).toEqual({ af_1: 'filled' });
+    expect(mergeFillOutcomes(undefined, { af_2: 'filled' })).toEqual({ af_2: 'filled' });
   });
 });

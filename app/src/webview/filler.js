@@ -523,6 +523,19 @@ function fillOne(el, value) {
 }
 `;
 
+// Pure merge for the per-field outcomes map: later results win. Extracted
+// so BrowserScreen's several fill passes (fast, AI, dropdown-resolution,
+// corrections — each of which may re-touch the same af-id) can be tested
+// without executing a generated script or rendering the component. Later
+// callers intentionally overwrite earlier ones: e.g. a field the fast pass
+// marks 'control-failed' because the raw profile value didn't match any
+// option, which the dropdown-resolution pass then fills successfully via
+// buildDirectFillScript, must end up 'filled', not stuck at the stale
+// earlier verdict.
+export function mergeFillOutcomes(prev, incoming) {
+  return { ...(prev || {}), ...(incoming || {}) };
+}
+
 export function buildDirectFillScript(valuesById) {
   return `
 (function() {
@@ -530,13 +543,17 @@ export function buildDirectFillScript(valuesById) {
   ${FILLER_RUNTIME}
 
   var filled = 0;
+  var outcomes = {};
   Object.keys(values).forEach(function(id) {
     var el = findEl(id);
-    if (!el) return;
-    if (fillOne(el, values[id])) filled++;
+    if (!el) { outcomes[id] = 'control-failed'; return; }
+    if (fillOne(el, values[id])) { filled++; outcomes[id] = 'filled'; }
+    else outcomes[id] = 'control-failed';
   });
   if (window.ReactNativeWebView) {
-    window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'AI_FILL_COMPLETE', filled: filled }));
+    window.ReactNativeWebView.postMessage(JSON.stringify({
+      type: 'AI_FILL_COMPLETE', filled: filled, outcomes: outcomes
+    }));
   }
 })();
   `;
