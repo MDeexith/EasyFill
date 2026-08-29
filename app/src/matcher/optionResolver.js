@@ -6,7 +6,9 @@
 // startsWith -> substring), then falls back to an AI call for options that
 // don't textually match the profile value (e.g. "USA" -> "United States").
 
-import { selectOptions } from '../api/backend';
+import { selectOptions, SENSITIVE_PROFILE_KEYS } from '../api/backend';
+
+const SENSITIVE_KEY_SET = new Set(SENSITIVE_PROFILE_KEYS);
 
 // Single source of truth for which scanned-field widgets count as a
 // dropdown. Exported so BrowserScreen's pre-harvest widget filter (fields
@@ -154,6 +156,12 @@ export async function resolveWithAi(unresolved, mapping, profile) {
   for (const field of unresolved) {
     const key = mapping[field.id];
     if (!key) continue;
+    // Unlike /match, /select-option genuinely needs the raw value (it asks
+    // the model which option corresponds to it), so redaction would make the
+    // call useless rather than private. The only safe fix is to never send
+    // these keys' values at all — an unresolved EEO dropdown is left for the
+    // user to pick by hand rather than escalated to a third-party LLM.
+    if (SENSITIVE_KEY_SET.has(key)) continue;
     const rawValue = valueFor(profile, key);
     if (!rawValue) continue;
     items.push({

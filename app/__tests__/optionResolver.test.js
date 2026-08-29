@@ -1,4 +1,10 @@
-import { resolveLocally } from '../src/matcher/optionResolver';
+jest.mock('../src/api/backend', () => {
+  const actual = jest.requireActual('../src/api/backend');
+  return { ...actual, selectOptions: jest.fn(() => Promise.resolve({})) };
+});
+
+import { resolveLocally, resolveWithAi } from '../src/matcher/optionResolver';
+import { selectOptions } from '../src/api/backend';
 
 // resolveLocally takes scanned fields, so build one with options attached.
 function dropdown(id, ...labels) {
@@ -99,5 +105,63 @@ describe('resolveLocally — placeholders and misses', () => {
     const { selections, unresolved } = resolveLocally([f], { af_8: 'heardAboutUs' }, { heardAboutUs: '' });
     expect(selections).toEqual({});
     expect(unresolved).toEqual([]);
+  });
+});
+
+describe('resolveWithAi — sensitive keys never reach the AI resolver', () => {
+  beforeEach(() => {
+    selectOptions.mockClear();
+  });
+
+  const SENSITIVE_KEYS = ['gender', 'hispanicLatino', 'veteranStatus', 'disabilityStatus', 'dateOfBirth'];
+
+  test.each(SENSITIVE_KEYS)('excludes a field mapped to %s from the /select-option payload', async key => {
+    // Paired with a resolvable non-sensitive field so the batch still makes
+    // a network call — otherwise items.length === 0 short-circuits before
+    // any call happens, which would make this assertion vacuous.
+    const sensitive = dropdown('af_10', 'Option A', 'Option B');
+    const companion = dropdown('af_10b', 'India', 'United States');
+    await resolveWithAi(
+      [sensitive, companion],
+      { [sensitive.id]: key, [companion.id]: 'country' },
+      { [key]: 'Some real answer', country: 'Some unmatched value' },
+    );
+    expect(selectOptions).toHaveBeenCalledTimes(1);
+    const [items] = selectOptions.mock.calls[0];
+    expect(items.find(it => it.fieldId === sensitive.id)).toBeUndefined();
+    expect(items.find(it => it.fieldId === companion.id)).toBeDefined();
+  });
+
+  test('a sensitive key with no other resolvable fields makes selectOptions a no-op call', async () => {
+    const f = dropdown('af_11', 'Option A', 'Option B');
+    const result = await resolveWithAi([f], { [f.id]: 'gender' }, { gender: 'Female' });
+    expect(result).toEqual({});
+    // items.length === 0 short-circuits before the network call entirely.
+    expect(selectOptions).not.toHaveBeenCalled();
+  });
+
+  test('still includes a non-sensitive key of the same shape (country)', async () => {
+    const f = dropdown('af_12', 'India', 'United States');
+    await resolveWithAi([f], { [f.id]: 'country' }, { country: 'Some unmatched value' });
+    expect(selectOptions).toHaveBeenCalledTimes(1);
+    const [items] = selectOptions.mock.calls[0];
+    const item = items.find(it => it.fieldId === f.id);
+    expect(item).toBeDefined();
+    expect(item.profileKey).toBe('country');
+    expect(item.profileValue).toBe('Some unmatched value');
+  });
+
+  test('a mixed batch keeps only the non-sensitive item', async () => {
+    const sensitive = dropdown('af_13', 'Option A', 'Option B');
+    const nonSensitive = dropdown('af_14', 'India', 'United States');
+    await resolveWithAi(
+      [sensitive, nonSensitive],
+      { [sensitive.id]: 'veteranStatus', [nonSensitive.id]: 'country' },
+      { veteranStatus: 'I am a protected veteran', country: 'Some unmatched value' },
+    );
+    expect(selectOptions).toHaveBeenCalledTimes(1);
+    const [items] = selectOptions.mock.calls[0];
+    expect(items).toHaveLength(1);
+    expect(items[0].fieldId).toBe(nonSensitive.id);
   });
 });

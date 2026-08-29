@@ -22,7 +22,7 @@ export function getBackendUrl() {
 // entirely would break EEO autofill. So we keep the keys but blank out the
 // values before any network call; nothing more specific than "field exists"
 // ever leaves the device.
-const SENSITIVE_PROFILE_KEYS = ['gender', 'hispanicLatino', 'veteranStatus', 'disabilityStatus', 'dateOfBirth'];
+export const SENSITIVE_PROFILE_KEYS = ['gender', 'hispanicLatino', 'veteranStatus', 'disabilityStatus', 'dateOfBirth'];
 
 export function redactSensitive(profile) {
   if (!profile) return profile;

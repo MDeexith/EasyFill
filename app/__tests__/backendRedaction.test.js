@@ -10,6 +10,14 @@ describe('redactSensitive', () => {
       dateOfBirth: '1990-01-01',
     };
     const result = redactSensitive(profile);
+    // Key-preserving: /match needs the key names present to map a form's
+    // "Gender"/"Veteran Status" field, so the keys must survive even though
+    // their values are wiped.
+    expect('gender' in result).toBe(true);
+    expect('hispanicLatino' in result).toBe(true);
+    expect('veteranStatus' in result).toBe(true);
+    expect('disabilityStatus' in result).toBe(true);
+    expect('dateOfBirth' in result).toBe(true);
     expect(result.gender).toBe('');
     expect(result.hispanicLatino).toBe('');
     expect(result.veteranStatus).toBe('');
