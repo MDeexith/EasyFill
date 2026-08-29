@@ -584,7 +584,10 @@ export function buildDirectFillScript(valuesById) {
 // `generation` is echoed back in the COMBOBOX_OPTIONS message so
 // harvestCoordinator can discard a late reply from a superseded run instead
 // of handing one run's options to another.
-export function buildComboboxHarvestScript(fieldIds, generation = 0) {
+// Defaults to null (not 0) so a script built without a generation is treated
+// as untagged and accepted by deliver(), rather than looking like a reply from
+// a generation that can never be current.
+export function buildComboboxHarvestScript(fieldIds, generation = null) {
   return `
 (function() {
   var ids = ${safeJson(fieldIds || [])};

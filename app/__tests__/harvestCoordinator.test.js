@@ -163,3 +163,14 @@ describe('createHarvestCoordinator - generation-tagged deliver', () => {
     expect(() => coord.deliver({ af_1: [] }, 99)).not.toThrow();
   });
 });
+
+describe('createHarvestCoordinator - default generation is untagged', () => {
+  test('a script built with no generation still resolves the pending harvest', async () => {
+    // buildComboboxHarvestScript defaults `generation` to null, which the
+    // message carries verbatim; deliver must treat that as untagged.
+    const coord = createHarvestCoordinator();
+    const promise = coord.startHarvest(() => {}, 8000);
+    coord.deliver({ af_1: [{ value: 'a', label: 'A' }] }, null);
+    await expect(promise).resolves.toEqual({ af_1: [{ value: 'a', label: 'A' }] });
+  });
+});
