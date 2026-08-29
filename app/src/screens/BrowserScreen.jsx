@@ -27,6 +27,7 @@ import {
   selectUncoveredFields,
   filledProfileKeys,
   hasUsableProfileValue,
+  collectFilledAfIds,
 } from '../matcher/coverage';
 import { resolveLocally, resolveWithAi, DROPDOWN_WIDGET_NAMES } from '../matcher/optionResolver';
 import { generateText } from '../api/backend';
@@ -294,7 +295,7 @@ export default function BrowserScreen({ route, navigation }) {
   // is 13-20s on free models, the combobox harvest waits up to 8s, and
   // /select-option adds ~3s on top. The watchdog fired mid-run, put the FAB
   // back into a tappable state, and invited exactly the concurrent second run
-  // that WEBVIEW_AUTOFILL_TIMEOUT_MS + the in-flight guard below now prevent.
+  // that AUTOFILL_WATCHDOG_MS + the in-flight guard below now prevent.
   // Sized above the sum of those legs plus the client LLM_TIMEOUT headroom.
   useEffect(() => {
     if (phase !== 'filling' && phase !== 'filling-ai' && phase !== 'drafting') return;
@@ -575,17 +576,17 @@ export default function BrowserScreen({ route, navigation }) {
       // Object.keys(fastMapping) both over-claimed (ids mapped to an empty key
       // that filled nothing) and under-claimed (everything the AI pass, the
       // dropdown-resolution pass and the correction replay filled), so
-      // wasAutoFilled was wrong in both directions.
-      const filledAfIds = [
-        ...Object.keys(fastMapping).filter(
-          id => hasUsableProfileValue(profile, fastMapping[id])
-        ),
-        ...Object.keys(safeAiMapping),
-        ...dropdownFilledIds,
-        ...Object.keys(correctionFills),
-      ];
+      // wasAutoFilled was wrong in both directions. BOTH mapping passes must
+      // go through the usable-value filter — see collectFilledAfIds.
+      const filledAfIds = collectFilledAfIds({
+        fastMapping,
+        aiMapping: safeAiMapping,
+        profile,
+        dropdownIds: dropdownFilledIds,
+        correctionIds: Object.keys(correctionFills),
+      });
       webViewRef.current?.injectJavaScript(
-        buildCorrectionListenerScript([...new Set(filledAfIds)])
+        buildCorrectionListenerScript(filledAfIds)
       );
 
       setMultiStepActive(true);
