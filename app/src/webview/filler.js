@@ -719,12 +719,10 @@ export function buildCorrectionListenerScript(filledAfIds) {
   if (window.__AF_CORRECTION_LISTENER__) return;
   window.__AF_CORRECTION_LISTENER__ = true;
   var filled = ${safeJson(filledMap)};
-  document.addEventListener('blur', function(e) {
-    var el = e.target;
+
+  function report(el, value) {
     var afId = el.getAttribute && el.getAttribute('data-af-id');
-    if (!afId) return;
-    var value = (el.value || el.textContent || '').trim();
-    if (!value) return;
+    if (!afId || !value) return;
     if (window.ReactNativeWebView) {
       window.ReactNativeWebView.postMessage(JSON.stringify({
         type: 'USER_INPUT_DETECTED',
@@ -733,6 +731,39 @@ export function buildCorrectionListenerScript(filledAfIds) {
         wasAutoFilled: !!filled[afId],
       }));
     }
+  }
+
+  // Text-like controls settle on blur.
+  document.addEventListener('blur', function(e) {
+    var el = e.target;
+    if (!el || !el.getAttribute) return;
+    var value = (el.value || el.textContent || '').trim();
+    report(el, value);
+  }, true);
+
+  // Checkboxes, radios and selects never blur meaningfully, so the answer the
+  // user chose was previously never learned. 'change' is where they commit.
+  document.addEventListener('change', function(e) {
+    var el = e.target;
+    if (!el || !el.getAttribute) return;
+    var type = (el.type || '').toLowerCase();
+    var value = '';
+
+    if (type === 'checkbox' || type === 'radio') {
+      if (!el.checked) return;
+      var lid = el.getAttribute('id');
+      var lab = null;
+      if (lid) { try { lab = document.querySelector('label[for="' + lid + '"]'); } catch (err) {} }
+      if (!lab && el.closest) lab = el.closest('label');
+      value = lab ? (lab.innerText || lab.textContent || '').trim() : (el.value || '').trim();
+    } else if (el.tagName === 'SELECT') {
+      var sel = el.options && el.options[el.selectedIndex];
+      value = sel ? (sel.text || sel.value || '').trim() : '';
+    } else {
+      value = (el.value || '').trim();
+    }
+
+    report(el, value);
   }, true);
 })();
   `;
