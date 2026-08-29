@@ -23,6 +23,11 @@ import { FORM_SCANNER_JS } from '../webview/formScanner';
 import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript, buildComboboxHarvestScript, mergeFillOutcomes } from '../webview/filler';
 import { createHarvestCoordinator } from '../webview/harvestCoordinator';
 import { matchFieldsToProfile } from '../matcher';
+import {
+  selectUncoveredFields,
+  filledProfileKeys,
+  hasUsableProfileValue,
+} from '../matcher/coverage';
 import { resolveLocally, resolveWithAi, DROPDOWN_WIDGET_NAMES } from '../matcher/optionResolver';
 import { generateText } from '../api/backend';
 import { loadProfile, addHistoryEntry, loadFieldCorrections, mergeFieldCorrections } from '../profile/store';
@@ -373,6 +378,10 @@ export default function BrowserScreen({ route, navigation }) {
   const doAutofill = useCallback(async (scanned) => {
     setPhase('filling');
     setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+    // af-ids are handed out afresh (af_1..af_N) on every scan, so a verdict
+    // kept from a previous page or a previous run collides by id with a
+    // completely different field. Start each run from a clean slate.
+    setFillOutcomes({});
     filledUrlsRef.current.add(urlRef.current);
     try {
       const profile = enrichProfile(loadProfile());
@@ -403,8 +412,15 @@ export default function BrowserScreen({ route, navigation }) {
       setPhase('filling-ai');
 
       // ── PASS 2: AI for uncovered fields ─────────────────────────────────
-      const uncovered = scanned.filter(f => !fastMapping[f.id]);
-      const fastKeys = new Set(Object.values(fastMapping));
+      // "Uncovered" is NOT simply "unmapped": a field mapped to a profile key
+      // that holds nothing (workAuthorization, and anything the user skipped
+      // in Application Details) fills nothing, so it must still reach the AI
+      // pass. `buildFillScript` above already reported those as 'no-value'
+      // without touching the DOM, so re-offering them here cannot double-fill.
+      const uncovered = selectUncoveredFields(scanned, fastMapping, profile);
+      // Dedup only against keys the fast pass actually FILLED — a key it
+      // mapped but left empty owns nothing and must not block the AI pass.
+      const fastKeys = filledProfileKeys(fastMapping, profile);
 
       let safeAiMapping = {};
       // Hoisted (not just local to the `if` below) so the dropdown-harvest
@@ -455,6 +471,9 @@ export default function BrowserScreen({ route, navigation }) {
         const dropdownIds = scanned
           .filter(f =>
             combinedMapping[f.id] &&
+            // No value to select => nothing to resolve; don't pay the cost of
+            // opening the menu (and don't risk perturbing the page) for it.
+            hasUsableProfileValue(profile, combinedMapping[f.id]) &&
             DROPDOWN_WIDGET_NAMES.includes(f.widget) &&
             !localSelections[f.id] &&
             !aiLocalSelections[f.id]
@@ -490,11 +509,17 @@ export default function BrowserScreen({ route, navigation }) {
         console.warn('[autofill] dropdown resolution failed:', err?.message || err);
       }
 
-      // Apply saved corrections for fields the profile didn't cover
+      // Apply saved corrections for fields the profile didn't cover.
+      // "Covered" must mean actually filled by one of the passes above — the
+      // old `fastMapping[f.id]` test both (a) skipped fields whose mapped key
+      // was empty, so a remembered answer for exactly the question the profile
+      // can't answer was never replayed, and (b) failed to skip AI-mapped
+      // fields, letting a stale correction overwrite a fresh AI fill.
+      const coveredMapping = { ...fastMapping, ...safeAiMapping };
       const corrections = loadFieldCorrections();
       const correctionFills = {};
       for (const f of scanned) {
-        if (fastMapping[f.id]) continue;
+        if (coveredMapping[f.id] && hasUsableProfileValue(profile, coveredMapping[f.id])) continue;
         const fp = [f.name||'', f.label||'', f.type||'', f.autocomplete||''].join('|');
         if (fp.split('|').filter(Boolean).length < 2) continue;
         if (corrections[fp] !== undefined) correctionFills[f.id] = corrections[fp];
@@ -525,6 +550,7 @@ export default function BrowserScreen({ route, navigation }) {
     setPhase('loading');
     setFields([]);
     setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+    setFillOutcomes({});
     setMultiStepActive(false);
     setStepCount(1);
     filledUrlsRef.current.clear();
