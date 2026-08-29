@@ -36,6 +36,37 @@ function clean(t) {
     .trim();
 }
 
+// Labels that prompt rather than answer. Never a valid selection.
+const PLACEHOLDER_RE = /^(?:select|choose|please select|none|-+|—)?\s*[.…]*$/i;
+
+// Only aliases that actually collide in practice; not a country database.
+const COUNTRY_ALIASES = {
+  usa: 'united states', us: 'united states', america: 'united states',
+  uk: 'united kingdom', britain: 'united kingdom', 'great britain': 'united kingdom',
+  uae: 'united arab emirates',
+};
+
+const DECLINE_RE =
+  /\b(?:decline|prefer not|do not wish|don't wish|not to answer|choose not|rather not)\b/i;
+
+// Parses "1-3 years", "5+ years", "Less than 1", "10 or more" into a range.
+// Returns null when the label is not a numeric bucket.
+function parseBucket(label) {
+  const s = (label || '').toString().toLowerCase();
+
+  let m = s.match(/(\d+(?:\.\d+)?)\s*(?:-|to|–|—)\s*(\d+(?:\.\d+)?)/);
+  if (m) return { min: parseFloat(m[1]), max: parseFloat(m[2]) };
+
+  m = s.match(/(\d+(?:\.\d+)?)\s*\+/) ||
+      s.match(/(?:more than|over|at least)\s*(\d+(?:\.\d+)?)/);
+  if (m) return { min: parseFloat(m[1]), max: Infinity };
+
+  m = s.match(/(?:less than|under|fewer than)\s*(\d+(?:\.\d+)?)/);
+  if (m) return { min: 0, max: parseFloat(m[1]) };
+
+  return null;
+}
+
 // Score one option against the target value. Returns 0 when no match.
 function scoreOption(opt, target) {
   const lab = clean(opt.label);
@@ -51,19 +82,45 @@ function scoreOption(opt, target) {
   // Common boolean-style mappings (work authorization, relocation, etc.)
   if (/^(yes|true|1|y)$/.test(target) && /^(yes|i (am|do)|authorized|true)/.test(lab)) score = Math.max(score, 4);
   if (/^(no|false|0|n)$/.test(target) && /^(no|i (am not|do not)|not authorized|false)/.test(lab)) score = Math.max(score, 4);
+  // Country aliases, so a profile saying "USA" finds "United States".
+  const aliased = COUNTRY_ALIASES[target];
+  if (aliased && lab === aliased) score = Math.max(score, 5);
+
+  // Decline intent, matched to whatever wording this particular form uses.
+  if (DECLINE_RE.test(target) && DECLINE_RE.test(lab)) score = Math.max(score, 5);
   return score;
 }
 
 function bestLocalOption(options, rawValue) {
   const target = clean(rawValue);
   if (!target) return null;
+
+  // A placeholder is never an answer, in either direction.
+  const usable = options.filter(o => !PLACEHOLDER_RE.test((o.label || '').trim()));
+  if (usable.length === 0) return null;
+  if (PLACEHOLDER_RE.test(String(rawValue).trim())) return null;
+
   let best = null;
   let bestScore = 0;
-  for (const opt of options) {
+  for (const opt of usable) {
     const s = scoreOption(opt, target);
     if (s > bestScore) { bestScore = s; best = opt; }
   }
-  return best ? (best.label || best.value || '') : null;
+  if (best) return best.label || best.value || '';
+
+  // No textual match: a numeric value may still belong to a range bucket,
+  // e.g. yearsExperience 1.7 into "1-3 years".
+  const num = parseFloat(target);
+  if (!Number.isNaN(num) && /^[\d.]+$/.test(target)) {
+    for (const opt of usable) {
+      const bucket = parseBucket(opt.label);
+      if (bucket && num >= bucket.min && num <= bucket.max) {
+        return opt.label || opt.value || '';
+      }
+    }
+  }
+
+  return null;
 }
 
 // Local pass: returns { selections, unresolved } where selections maps fieldId
