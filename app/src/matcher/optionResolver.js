@@ -57,7 +57,7 @@ function parseBucket(label) {
   let m = s.match(/(\d+(?:\.\d+)?)\s*(?:-|to|–|—)\s*(\d+(?:\.\d+)?)/);
   if (m) return { min: parseFloat(m[1]), max: parseFloat(m[2]) };
 
-  m = s.match(/(\d+(?:\.\d+)?)\s*\+/) ||
+  m = s.match(/(\d+(?:\.\d+)?)\s*(?:\+|or more|or above|and above)/) ||
       s.match(/(?:more than|over|at least)\s*(\d+(?:\.\d+)?)/);
   if (m) return { min: parseFloat(m[1]), max: Infinity };
 

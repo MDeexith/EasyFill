@@ -41,8 +41,16 @@ describe('resolveLocally — numeric buckets', () => {
     expect(resolveOne(YEARS(), 'yearsExperience', { yearsExperience: 8 }).hit).toBe('5+ years');
   });
 
-  test('handles a value on a bucket boundary', () => {
-    expect(resolveOne(YEARS(), 'yearsExperience', { yearsExperience: 3 }).hit).toBe('3-5 years');
+  test('places 2.9 into the 1-3 bucket via range matching, not prefix collision', () => {
+    // 2.9 is not a prefix of any label, so this can only resolve through
+    // parseBucket's range check (unlike a value of 3, which "3-5 years"
+    // would also match via the pre-existing lab.indexOf(target) === 0 rule).
+    expect(resolveOne(YEARS(), 'yearsExperience', { yearsExperience: 2.9 }).hit).toBe('1-3 years');
+  });
+
+  test('resolves "N or more" phrasing for an open-ended bucket', () => {
+    const f = dropdown('af_9', 'Select…', '0-5 years', '5-10 years', '10 or more years');
+    expect(resolveOne(f, 'yearsExperience', { yearsExperience: 12 }).hit).toBe('10 or more years');
   });
 });
 
