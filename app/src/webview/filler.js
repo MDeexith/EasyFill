@@ -750,6 +750,13 @@ export function buildCorrectionListenerScript(filledAfIds) {
     var value = '';
 
     if (type === 'checkbox' || type === 'radio') {
+      // Only learn checked state. Unchecking is not learned because (1) it would
+      // require storing a separate "off" value, but the replay path (buildFillScript
+      // -> fillOne) has no logic to set .checked = false based on a stored value,
+      // and (2) for checkbox groups, only the checked option is semantically meaningful.
+      // Standalone boolean checkboxes don't round-trip correctly through the existing
+      // replay system, which only sets .value, not .checked. Changing this would
+      // require redesigning either the storage format or the replay path.
       if (!el.checked) return;
       var lid = el.getAttribute('id');
       var lab = null;
