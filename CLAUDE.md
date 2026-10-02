@@ -24,12 +24,12 @@ pip install -r requirements.txt
 uvicorn main:app --reload --port 3001   # Dev server
 ```
 
-**Required env var:** `OPENROUTER_API_KEY` in `.env`
+**Required env var:** `GROQ_API_KEY` in `.env`
 
 ### Docker
 ```bash
 docker build -t easyfill-backend .
-docker run -p 3001:3001 -e OPENROUTER_API_KEY=<key> easyfill-backend
+docker run -p 3001:3001 -e GROQ_API_KEY=<key> easyfill-backend
 ```
 
 ## Architecture
@@ -40,7 +40,7 @@ docker run -p 3001:3001 -e OPENROUTER_API_KEY=<key> easyfill-backend
 3. `matchFieldsToProfile()` in `app/src/matcher/index.js`:
    - Check MMKV cache (hostname-keyed, 30-day TTL)
    - Run regex heuristics (`heuristics.js`)
-   - If cache miss & LLM enabled → POST `/match` to backend (OpenRouter)
+   - If cache miss & LLM enabled → POST `/match` to backend (Groq)
    - Merge with confidence: autocomplete attr (1.0) > field type (0.95) > AI ≥0.6 > regex > AI <0.6
    - Deduplicate: one profile key → highest-confidence field wins
 4. `buildFillScript(mapping, profileJson)` in `app/src/webview/filler.js` — fires React/Vue/Angular-compatible events to set values natively, highlights filled fields green
@@ -60,7 +60,7 @@ docker run -p 3001:3001 -e OPENROUTER_API_KEY=<key> easyfill-backend
 | `app/src/screens/BrowserScreen.jsx` | WebView orchestration: inject scripts, handle messages, autofill lifecycle |
 | `backend_py/routes/match.py` | LLM field matching via `prompts/match.txt` |
 | `backend_py/routes/jobs.py` | Job feed: JobSpy + Jobicy + Remotive + Greenhouse in parallel; layered cache |
-| `backend_py/openrouter.py` | `generate(prompt)` async wrapper; used by match, generate, parse_resume |
+| `backend_py/groq_client.py` | `generate(prompt)` async wrapper; used by match, generate, parse_resume |
 
 ### Profile Storage (MMKV)
 - `saveProfile` / `loadProfile` — flat object matching `schema.js`

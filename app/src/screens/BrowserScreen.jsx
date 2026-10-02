@@ -358,7 +358,7 @@ export default function BrowserScreen({ route, navigation }) {
 
     // Worker-pool: at most DRAFT_CONCURRENCY generate calls in flight at a
     // time. Sequential awaits caused N×latency wall time; full Promise.all
-    // would burst the OpenRouter free-tier rate limit on long forms.
+    // would burst the Groq free-tier rate limit on long forms.
     const DRAFT_CONCURRENCY = 4;
     let nextIdx = 0;
     let completed = 0;

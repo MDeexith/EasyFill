@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "EasyFill Backend API Tests",
-    "description": "Tests every application endpoint exposed by backend_py/main.py. Set base_url to your server (default http://localhost:3001), start the backend with OPENROUTER_API_KEY, and run the collection. Run from the repository root so Postman can read backend_py/fixtures/sample-resume.pdf; if Postman cannot resolve it, select that PDF manually in the Parse Resume requests. Increase the Postman request timeout to at least 90000 ms for OpenRouter calls and slower job-source requests. Source endpoints may return empty job arrays when upstream services have no results or are unavailable; tests check API response shape rather than requiring a minimum count. POST /jobs/companies adds a sample handle to the in-memory company list, and POST /jobs/refresh clears the in-memory JobSpy cache. The /docs, /redoc and /openapi.json URLs are FastAPI documentation endpoints and are included too.",
+    "description": "Tests every application endpoint exposed by backend_py/main.py. Set base_url to your server (default http://localhost:3001), start the backend with GROQ_API_KEY, and run the collection. Run from the repository root so Postman can read backend_py/fixtures/sample-resume.pdf; if Postman cannot resolve it, select that PDF manually in the Parse Resume requests. Increase the Postman request timeout to at least 90000 ms for Groq calls and slower job-source requests. Source endpoints may return empty job arrays when upstream services have no results or are unavailable; tests check API response shape rather than requiring a minimum count. POST /jobs/companies adds a sample handle to the in-memory company list, and POST /jobs/refresh clears the in-memory JobSpy cache. The /docs, /redoc and /openapi.json URLs are FastAPI documentation endpoints and are included too.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -54,7 +54,7 @@
       ]
     },
     {
-      "name": "OpenRouter",
+      "name": "Groq",
       "item": [
         {
           "name": "POST /match/",
@@ -109,7 +109,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"profile\": {\n    \"firstName\": \"Jane\",\n    \"lastName\": \"Doe\",\n    \"email\": \"jane@example.com\",\n    \"phone\": \"+1-555-000-1234\",\n    \"linkedIn\": \"https://linkedin.com/in/janedoe\",\n    \"currentTitle\": \"Software Engineer\",\n    \"skills\": \"Python, React\"\n  },\n  \"label\": \"Why are you a good fit for this role?\",\n  \"placeholder\": \"Your answer\",\n  \"nearby\": \"Software engineer application\",\n  \"host\": \"example.com\"\n}",
+              "raw": "{\n  \"profile\": {\n    \"firstName\": \"Jane\",\n    \"lastName\": \"Doe\",\n    \"email\": \"jane@example.com\",\n    \"phone\": \"+1-555-000-1234\",\n    \"linkedIn\": \"https://linkedin.com/in/janedoe\",\n    \"currentTitle\": \"Software Engineer\",\n    \"skills\": \"Python, React\"\n  },\n  \"label\": \"Why are you a good fit for this role?\",\n  \"placeholder\": \"Your answer\",\n  \"nearby\": \"Software engineer application\",\n  \"host\": \"example.com\",\n  \"jobDescription\": \"Backend engineer building reliable Python APIs and distributed systems.\",\n  \"wordLimit\": 120\n}",
               "options": {
                 "raw": {
                   "language": "json"

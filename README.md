@@ -50,28 +50,24 @@ pip install -r requirements.txt
 uvicorn main:app --reload --port 3001
 ```
 
-Required: `OPENROUTER_API_KEY` in a `.env` file.
+Required: `GROQ_API_KEY` in a `.env` file.
 
 | Variable | Purpose |
 |---|---|
-| `OPENROUTER_API_KEY` | **Required.** OpenRouter API key |
-| `OPENROUTER_FREE_MODELS` | Comma-separated model ids, max 3. Overrides the defaults so a delisted free model is a config change, not a deploy |
-| `OPENROUTER_BASE_URL` | Point the OpenAI-compatible client elsewhere |
-| `FASTROUTER_API_KEY` | Optional paid fallback, used when the free models are rate-limited, delisted, or time out |
-| `FASTROUTER_MODEL` | Defaults to `openai/gpt-5.4-nano` |
+| `GROQ_API_KEY` | **Required.** Groq API key |
+| `GROQ_MODEL` | Defaults to `openai/gpt-oss-120b`; use a Groq GPT-OSS model supporting low reasoning effort |
 | `PORT` | Server port |
 
-Free OpenRouter models get delisted without notice and routinely take 50–60s on
-long prompts. Setting `FASTROUTER_API_KEY` is what keeps parsing fast and
-reliable — without it, a slow or missing free model degrades the app to
-regex-only extraction.
+All LLM routes call Groq directly with low reasoning effort and final-answer output.
+There is no provider/model fallback or automatic retry. Resume parsing retains
+local regex extraction if the LLM request fails.
 
 ### Docker
 
 ```bash
 cd backend_py
 docker build -t easyfill-backend .
-docker run -p 3001:3001 -e OPENROUTER_API_KEY=<key> easyfill-backend
+docker run -p 3001:3001 -e GROQ_API_KEY=<key> easyfill-backend
 ```
 
 ---
@@ -126,7 +122,7 @@ EEO questions default to "Decline to self-identify" unless you opt in.
 | `app/src/profile/store.js` | All MMKV persistence |
 | `app/src/api/backend.js` | HTTP layer, and the redaction chokepoint |
 | `app/src/screens/BrowserScreen.jsx` | WebView orchestration and the autofill sequence |
-| `backend_py/openrouter.py` | LLM calls with model fallback |
+| `backend_py/groq_client.py` | Groq LLM calls using GPT-OSS-120B |
 | `backend_py/routes/` | The five API routes |
 
 ---
