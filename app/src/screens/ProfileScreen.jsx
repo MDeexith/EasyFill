@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -9,7 +9,7 @@ import {
   Platform,
   TouchableOpacity,
 } from 'react-native';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Btn, Chip, Eyebrow, T } from '../components/ui';
 import Icon from '../components/Icon';
@@ -23,18 +23,7 @@ import {
   listFieldCorrections,
   deleteFieldCorrection,
 } from '../profile/store';
-import { PROFILE_FIELD_LABELS } from '../profile/schema';
-
-const SECTIONS = [
-  { title: 'Identity', fields: ['firstName', 'lastName', 'email', 'phone', 'pronouns', 'dateOfBirth', 'gender'] },
-  { title: 'Location', fields: ['city', 'state', 'country', 'zipCode'] },
-  { title: 'Links', fields: ['linkedIn', 'portfolio', 'github'] },
-  { title: 'Work', fields: ['currentTitle', 'currentCompany', 'yearsExperience', 'salary', 'startDate', 'skills'] },
-  // For yes/no questions enter exactly "Yes" or "No" — the autofill engine
-  // matches these against radio/select option labels at fill time.
-  { title: 'Eligibility', fields: ['workAuthorization', 'willingToRelocate', 'noticePeriod'] },
-  { title: 'Cover letter', fields: ['coverLetter'] },
-];
+import { PROFILE_FIELD_LABELS, PROFILE_EDITOR_SECTIONS as SECTIONS } from '../profile/schema';
 
 function getInitials(profile) {
   const first = (profile.firstName || profile.name || '').trim();
@@ -62,10 +51,18 @@ function fieldDisplayLabel(item) {
 }
 
 export default function ProfileScreen() {
+  // ProfileScreen is a tab screen, so it gets no `navigation` prop for the
+  // ROOT stack. useNavigation() resolves against the nearest navigator and
+  // navigate() bubbles unhandled route names up to the root, which is where
+  // ApplicationDetails lives (see App.jsx).
+  const navigation = useNavigation();
   const [profile, setProfile] = useState(() => loadProfile());
   const [saved, setSaved] = useState(false);
   const [mappingGroups, setMappingGroups] = useState(() => groupMappingsByHost(listMappingCache()));
   const [corrections, setCorrections] = useState(() => listFieldCorrections());
+  // Tracks unsaved edits so refocusing the screen never silently discards
+  // what the user is halfway through typing.
+  const dirtyRef = useRef(false);
 
   const refreshMemory = useCallback(() => {
     setMappingGroups(groupMappingsByHost(listMappingCache()));
@@ -75,19 +72,35 @@ export default function ProfileScreen() {
   useFocusEffect(
     useCallback(() => {
       refreshMemory();
+      // Pick up whatever ApplicationDetails just wrote to MMKV — without this
+      // the round trip would appear to have done nothing.
+      if (!dirtyRef.current) setProfile(loadProfile());
     }, [refreshMemory])
   );
 
   const update = useCallback((key, value) => {
+    dirtyRef.current = true;
     setProfile(prev => ({ ...prev, [key]: key === 'yearsExperience' ? Number(value) || 0 : value }));
     setSaved(false);
   }, []);
 
   const handleSave = useCallback(() => {
     saveProfile(profile);
+    dirtyRef.current = false;
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
   }, [profile]);
+
+  const openApplicationDetails = useCallback(() => {
+    // Persist first: ApplicationDetailsScreen reads the profile straight off
+    // MMKV, so an unsaved edit here would otherwise be clobbered when it
+    // writes back.
+    if (dirtyRef.current) {
+      saveProfile(profile);
+      dirtyRef.current = false;
+    }
+    navigation.navigate('ApplicationDetails', { from: 'profile' });
+  }, [navigation, profile]);
 
   const handleDeleteMapping = useCallback((host, fingerprint) => {
     deleteMappingCacheEntry(host, fingerprint);
@@ -128,9 +141,30 @@ export default function ProfileScreen() {
             </Chip>
           </View>
 
+          <View style={{ paddingHorizontal: 16, marginTop: 4 }}>
+            <TouchableOpacity
+              onPress={openApplicationDetails}
+              activeOpacity={0.85}
+              style={styles.detailsCta}
+            >
+              <View style={styles.detailsCtaIcon}>
+                <Icon name="sparkles" size={15} color={theme.colors.accentInk} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.detailsCtaTitle}>Application questions</Text>
+                <Text style={styles.detailsCtaSub}>
+                  Work authorization, sponsorship and the optional equal-opportunity
+                  answers, in one guided pass.
+                </Text>
+              </View>
+              <Icon name="arrow-right" size={15} color={theme.colors.muted} />
+            </TouchableOpacity>
+          </View>
+
           {SECTIONS.map(section => (
             <View key={section.title} style={{ paddingHorizontal: 16, marginTop: 12 }}>
               <Eyebrow style={{ marginBottom: 8 }}>{section.title.toUpperCase()}</Eyebrow>
+              {section.note ? <Text style={styles.sectionNote}>{section.note}</Text> : null}
               <View style={styles.card}>
                 {section.fields.map((key, i, arr) => (
                   <View
@@ -375,6 +409,45 @@ const styles = StyleSheet.create({
     borderTopColor: theme.colors.border,
   },
 
+  detailsCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: theme.colors.surface,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+  },
+  detailsCtaIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    backgroundColor: theme.colors.accentSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  detailsCtaTitle: {
+    fontSize: 14,
+    fontFamily: theme.font.sans,
+    fontWeight: '700',
+    color: theme.colors.ink,
+  },
+  detailsCtaSub: {
+    fontSize: 11.5,
+    fontFamily: theme.font.sans,
+    color: theme.colors.muted,
+    lineHeight: 16,
+    marginTop: 2,
+  },
+  sectionNote: {
+    fontSize: 11.5,
+    fontFamily: theme.font.sans,
+    color: theme.colors.muted,
+    lineHeight: 16,
+    marginBottom: 8,
+  },
   memHeader: {
     flexDirection: 'row',
     alignItems: 'center',

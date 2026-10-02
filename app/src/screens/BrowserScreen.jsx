@@ -20,9 +20,16 @@ import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
 import { FORM_SCANNER_JS } from '../webview/formScanner';
 
-import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript } from '../webview/filler';
+import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript, buildComboboxHarvestScript, mergeFillOutcomes } from '../webview/filler';
+import { createHarvestCoordinator } from '../webview/harvestCoordinator';
 import { matchFieldsToProfile } from '../matcher';
-import { resolveLocally, resolveWithAi } from '../matcher/optionResolver';
+import {
+  selectUncoveredFields,
+  filledProfileKeys,
+  hasUsableProfileValue,
+  collectFilledAfIds,
+} from '../matcher/coverage';
+import { resolveLocally, resolveWithAi, DROPDOWN_WIDGET_NAMES } from '../matcher/optionResolver';
 import { generateText } from '../api/backend';
 import { loadProfile, addHistoryEntry, loadFieldCorrections, mergeFieldCorrections } from '../profile/store';
 import { enrichProfile } from '../profile/enrich';
@@ -149,6 +156,9 @@ const CF_CHALLENGE_PROBE = `(function(){
 })(); true;`;
 
 
+// Upper bound on one autofill run before the UI gives up and offers a retry.
+const AUTOFILL_WATCHDOG_MS = 60000;
+
 export default function BrowserScreen({ route, navigation }) {
   const { url } = route.params;
   const webViewRef = useRef(null);
@@ -173,6 +183,7 @@ export default function BrowserScreen({ route, navigation }) {
   const [tracked, setTracked] = useState(false);
   const [webViewCanGoBack, setWebViewCanGoBack] = useState(false);
   const [fillStats, setFillStats] = useState({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+  const [fillOutcomes, setFillOutcomes] = useState({});
   const [pendingCorrections, setPendingCorrections] = useState({});
   const [multiStepActive, setMultiStepActive] = useState(false);
   const [stepCount, setStepCount] = useState(1);
@@ -229,6 +240,23 @@ export default function BrowserScreen({ route, navigation }) {
   const panelAnim = useRef(new Animated.Value(0)).current;
   const lastInjectedUrl = useRef('');
   const fieldsRef = useRef([]);
+  // One coordinator per mounted screen. doAutofill is re-entrant (multi-step
+  // forms re-invoke it without awaiting a prior run), so a bare ref holding
+  // a single "resolve" would let a second run's harvest steal the first
+  // run's wakeup and strand it forever — see harvestCoordinator.js.
+  const harvestCoordinatorRef = useRef(createHarvestCoordinator());
+  // Re-entrancy guard for doAutofill. The FAB stays visible (and tappable)
+  // during 'filling-ai', so a second run was one tap away; multi-step forms
+  // can also re-invoke doAutofill on a timer. A concurrent run superseded run
+  // 1's harvest with {}, injected a second harvest script over the first, and
+  // delivered run 1's COMBOBOX_OPTIONS into run 2's slot.
+  const autofillInFlightRef = useRef(false);
+  // A re-entrant call is queued, not dropped. Multi-step forms legitimately
+  // re-invoke doAutofill (FIELDS_SCANNED / FIELDS_UPDATED on a 600ms timer)
+  // and mark the URL as filled BEFORE calling, so simply returning would mean
+  // that step is never filled at all. Last call wins; drained in the finally.
+  const pendingAutofillRef = useRef(null);
+  const doAutofillRef = useRef(null);
 
   // Single entry point for scanner injection. Skips the scanner entirely on
   // Cloudflare interstitials — crawling / mutating the challenge page trips
@@ -260,15 +288,22 @@ export default function BrowserScreen({ route, navigation }) {
     return () => clearTimeout(timer);
   }, [loading]);
 
-  // Safety net: if filling/filling-ai/drafting hangs (backend timeout, network error),
-  // revert to detected after 25s so user can retry.
+  // Safety net: if filling/filling-ai/drafting hangs (backend timeout, network
+  // error), revert to detected so the user can retry.
+  //
+  // 25s was shorter than the critical path this branch created: pass-2 /match
+  // is 13-20s on free models, the combobox harvest waits up to 8s, and
+  // /select-option adds ~3s on top. The watchdog fired mid-run, put the FAB
+  // back into a tappable state, and invited exactly the concurrent second run
+  // that AUTOFILL_WATCHDOG_MS + the in-flight guard below now prevent.
+  // Sized above the sum of those legs plus the client LLM_TIMEOUT headroom.
   useEffect(() => {
     if (phase !== 'filling' && phase !== 'filling-ai' && phase !== 'drafting') return;
     const timer = setTimeout(() => {
       setPhase(prev =>
         (prev === 'filling' || prev === 'filling-ai' || prev === 'drafting') ? 'detected' : prev
       );
-    }, 25000);
+    }, AUTOFILL_WATCHDOG_MS);
     return () => clearTimeout(timer);
   }, [phase]);
 
@@ -354,6 +389,12 @@ export default function BrowserScreen({ route, navigation }) {
     if (Object.keys(drafts).length > 0) {
       const script = buildDirectFillScript(drafts);
       webViewRef.current?.injectJavaScript(script);
+      // Drafts land after doAutofill already installed the listener, so tell
+      // the (already-installed) listener about them — otherwise a generated
+      // cover letter blurring out reads as a user-authored correction.
+      webViewRef.current?.injectJavaScript(
+        buildCorrectionListenerScript(Object.keys(drafts))
+      );
       // Fallback: AI_FILL_COMPLETE message sets phase, but guard against it not firing
       setTimeout(() => setPhase(p => p === 'drafting' ? 'filled' : p), 5000);
     } else {
@@ -364,8 +405,18 @@ export default function BrowserScreen({ route, navigation }) {
   // Unified autofill: two-pass progressive fill.
   // Pass 1 (cache + regex) injects immediately; Pass 2 (AI) fills remaining in background.
   const doAutofill = useCallback(async (scanned) => {
+    if (autofillInFlightRef.current) {
+      console.warn('[autofill] run already in flight — queueing this call');
+      pendingAutofillRef.current = scanned;
+      return;
+    }
+    autofillInFlightRef.current = true;
     setPhase('filling');
     setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+    // af-ids are handed out afresh (af_1..af_N) on every scan, so a verdict
+    // kept from a previous page or a previous run collides by id with a
+    // completely different field. Start each run from a clean slate.
+    setFillOutcomes({});
     filledUrlsRef.current.add(urlRef.current);
     try {
       const profile = enrichProfile(loadProfile());
@@ -377,7 +428,7 @@ export default function BrowserScreen({ route, navigation }) {
 
       // Resolve dropdown options locally (no AI) so the fast pass fills the
       // correct option (e.g. profile "USA" -> option "United States").
-      const { selections: localSelections, unresolved: fastDropdownsForAi } =
+      const { selections: localSelections } =
         resolveLocally(scanned, fastMapping, profile);
 
       webViewRef.current?.injectJavaScript(
@@ -396,11 +447,20 @@ export default function BrowserScreen({ route, navigation }) {
       setPhase('filling-ai');
 
       // ── PASS 2: AI for uncovered fields ─────────────────────────────────
-      const uncovered = scanned.filter(f => !fastMapping[f.id]);
-      const fastKeys = new Set(Object.values(fastMapping));
+      // "Uncovered" is NOT simply "unmapped": a field mapped to a profile key
+      // that holds nothing (workAuthorization, and anything the user skipped
+      // in Application Details) fills nothing, so it must still reach the AI
+      // pass. `buildFillScript` above already reported those as 'no-value'
+      // without touching the DOM, so re-offering them here cannot double-fill.
+      const uncovered = selectUncoveredFields(scanned, fastMapping, profile);
+      // Dedup only against keys the fast pass actually FILLED — a key it
+      // mapped but left empty owns nothing and must not block the AI pass.
+      const fastKeys = filledProfileKeys(fastMapping, profile);
 
       let safeAiMapping = {};
-      let aiDropdownsForAi = [];
+      // Hoisted (not just local to the `if` below) so the dropdown-harvest
+      // block further down can exclude fields this pass already resolved.
+      let aiLocalSelections = {};
 
       if (uncovered.length > 0) {
         try {
@@ -414,9 +474,7 @@ export default function BrowserScreen({ route, navigation }) {
 
           if (Object.keys(safeAiMapping).length > 0) {
             // Resolve dropdown options locally for AI-mapped fields too.
-            const { selections: aiLocalSelections, unresolved } =
-              resolveLocally(uncovered, safeAiMapping, profile);
-            aiDropdownsForAi = unresolved;
+            aiLocalSelections = resolveLocally(uncovered, safeAiMapping, profile).selections;
             webViewRef.current?.injectJavaScript(
               buildFillScript(safeAiMapping, JSON.stringify(profile), uncovered, aiLocalSelections)
             );
@@ -435,27 +493,77 @@ export default function BrowserScreen({ route, navigation }) {
         }
       }
 
-      // ── Dropdown option AI resolution ───────────────────────────────────
-      // For dropdowns whose option couldn't be matched locally, ask the LLM to
-      // pick the best option (e.g. "USA" -> "United States", "4" -> "3-5 years")
-      // and inject a dropdown-only fill. Runs in the background after the fast
-      // pass, mirroring the AI key-matching pass.
+      // ── Dropdown resolution ─────────────────────────────────────────────
+      // Options for React-Select style comboboxes do not exist until the menu
+      // is opened, so harvest them from the live page, then run the ordinary
+      // local-then-AI resolution over fields that finally have options.
+      // Only fields NEITHER pass above already filled are harvested — a
+      // dropdown that Pass 1/2 already resolved is left alone here so a
+      // user's manual correction to it (made in the several seconds this
+      // await can take) is never silently overwritten.
+      //
+      // Hoisted out of the try so the correction listener below can be told
+      // which ids this pass wrote to.
+      const dropdownFilledIds = [];
+
       try {
-        const dropdownsForAi = fastDropdownsForAi.concat(aiDropdownsForAi);
-        if (dropdownsForAi.length > 0) {
-          const combinedMapping = { ...fastMapping, ...safeAiMapping };
-          const aiSelections = await resolveWithAi(dropdownsForAi, combinedMapping, profile);
-          if (Object.keys(aiSelections).length > 0) {
-            webViewRef.current?.injectJavaScript(buildDirectFillScript(aiSelections));
+        const combinedMapping = { ...fastMapping, ...safeAiMapping };
+        const dropdownIds = scanned
+          .filter(f =>
+            combinedMapping[f.id] &&
+            // No value to select => nothing to resolve; don't pay the cost of
+            // opening the menu (and don't risk perturbing the page) for it.
+            hasUsableProfileValue(profile, combinedMapping[f.id]) &&
+            DROPDOWN_WIDGET_NAMES.includes(f.widget) &&
+            !localSelections[f.id] &&
+            !aiLocalSelections[f.id]
+          )
+          .map(f => f.id);
+
+        if (dropdownIds.length > 0) {
+          const harvested = await harvestCoordinatorRef.current.startHarvest(
+            gen => webViewRef.current?.injectJavaScript(
+              buildComboboxHarvestScript(dropdownIds, gen)
+            ),
+            8000
+          );
+
+          // Attach the harvested options so isDropdown() finally passes.
+          const withOptions = scanned
+            .filter(f => harvested[f.id] && harvested[f.id].length > 0)
+            .map(f => ({ ...f, options: harvested[f.id] }));
+
+          const { selections, unresolved } =
+            resolveLocally(withOptions, combinedMapping, profile);
+
+          if (Object.keys(selections).length > 0) {
+            dropdownFilledIds.push(...Object.keys(selections));
+            webViewRef.current?.injectJavaScript(buildDirectFillScript(selections));
+          }
+
+          if (unresolved.length > 0) {
+            const aiSelections = await resolveWithAi(unresolved, combinedMapping, profile);
+            if (Object.keys(aiSelections).length > 0) {
+              dropdownFilledIds.push(...Object.keys(aiSelections));
+              webViewRef.current?.injectJavaScript(buildDirectFillScript(aiSelections));
+            }
           }
         }
-      } catch { /* dropdown AI resolution failed — local selections stand */ }
+      } catch (err) {
+        console.warn('[autofill] dropdown resolution failed:', err?.message || err);
+      }
 
-      // Apply saved corrections for fields the profile didn't cover
+      // Apply saved corrections for fields the profile didn't cover.
+      // "Covered" must mean actually filled by one of the passes above — the
+      // old `fastMapping[f.id]` test both (a) skipped fields whose mapped key
+      // was empty, so a remembered answer for exactly the question the profile
+      // can't answer was never replayed, and (b) failed to skip AI-mapped
+      // fields, letting a stale correction overwrite a fresh AI fill.
+      const coveredMapping = { ...fastMapping, ...safeAiMapping };
       const corrections = loadFieldCorrections();
       const correctionFills = {};
       for (const f of scanned) {
-        if (fastMapping[f.id]) continue;
+        if (coveredMapping[f.id] && hasUsableProfileValue(profile, coveredMapping[f.id])) continue;
         const fp = [f.name||'', f.label||'', f.type||'', f.autocomplete||''].join('|');
         if (fp.split('|').filter(Boolean).length < 2) continue;
         if (corrections[fp] !== undefined) correctionFills[f.id] = corrections[fp];
@@ -464,8 +572,21 @@ export default function BrowserScreen({ route, navigation }) {
         webViewRef.current?.injectJavaScript(buildDirectFillScript(correctionFills));
       }
 
+      // Every id this run actually wrote to, not just the fast pass's. The old
+      // Object.keys(fastMapping) both over-claimed (ids mapped to an empty key
+      // that filled nothing) and under-claimed (everything the AI pass, the
+      // dropdown-resolution pass and the correction replay filled), so
+      // wasAutoFilled was wrong in both directions. BOTH mapping passes must
+      // go through the usable-value filter — see collectFilledAfIds.
+      const filledAfIds = collectFilledAfIds({
+        fastMapping,
+        aiMapping: safeAiMapping,
+        profile,
+        dropdownIds: dropdownFilledIds,
+        correctionIds: Object.keys(correctionFills),
+      });
       webViewRef.current?.injectJavaScript(
-        buildCorrectionListenerScript(Object.keys(fastMapping))
+        buildCorrectionListenerScript(filledAfIds)
       );
 
       setMultiStepActive(true);
@@ -479,13 +600,24 @@ export default function BrowserScreen({ route, navigation }) {
     } catch {
       filledUrlsRef.current.delete(urlRef.current);
       setPhase('detected');
+    } finally {
+      autofillInFlightRef.current = false;
+      const queued = pendingAutofillRef.current;
+      pendingAutofillRef.current = null;
+      // Drained via a ref so the retry doesn't make doAutofill a dependency
+      // of itself. Cleared before the retry runs, so a queued run cannot
+      // re-queue itself into a loop.
+      if (queued) setTimeout(() => doAutofillRef.current?.(queued), 300);
     }
   }, [doAiDraft]);
+
+  useEffect(() => { doAutofillRef.current = doAutofill; }, [doAutofill]);
 
   const manualRescan = useCallback(() => {
     setPhase('loading');
     setFields([]);
     setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+    setFillOutcomes({});
     setMultiStepActive(false);
     setStepCount(1);
     filledUrlsRef.current.clear();
@@ -641,6 +773,7 @@ export default function BrowserScreen({ route, navigation }) {
       if (data.type === 'FILL_COMPLETE') {
         const n = data.filled ?? 0;
         setFilledCount(prev => prev + n);
+        setFillOutcomes(prev => mergeFillOutcomes(prev, data.outcomes));
         setTracked(prev => {
           if (!prev && n > 0) {
             addHistoryEntry({
@@ -661,6 +794,7 @@ export default function BrowserScreen({ route, navigation }) {
       if (data.type === 'AI_FILL_COMPLETE') {
         const n = data.filled ?? 0;
         setFilledCount(prev => prev + n);
+        setFillOutcomes(prev => mergeFillOutcomes(prev, data.outcomes));
         setPhase(prev => prev === 'drafting' ? 'filled' : prev);
       }
 
@@ -691,6 +825,10 @@ export default function BrowserScreen({ route, navigation }) {
             inputs: data.inputCount,
           }));
         } catch (e) {}
+      }
+
+      if (data.type === 'COMBOBOX_OPTIONS') {
+        harvestCoordinatorRef.current.deliver(data.options, data.generation);
       }
 
       if (data.type === 'USER_INPUT_DETECTED') {
@@ -752,6 +890,7 @@ export default function BrowserScreen({ route, navigation }) {
             setLoading(true);
             setFields([]);
             setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+            setFillOutcomes({});
             setPendingCorrections({});
             // Preserve 'ats-loading' so the user sees the "Opening application
             // form…" banner uninterrupted across the parent→embed navigation.
@@ -775,6 +914,7 @@ export default function BrowserScreen({ route, navigation }) {
               setPhase(prev => prev === 'ats-loading' ? prev : 'loading');
               setFields([]);
               setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
+              setFillOutcomes({});
               setPendingCorrections({});
               // Reset ATS loop guard when hostname changes so a new job page on the
               // same company's ATS gets a fresh transform attempt.

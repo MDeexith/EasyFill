@@ -9,6 +9,7 @@ import LogoSplashScreen from './src/screens/LogoSplashScreen';
 import SplashScreen from './src/screens/SplashScreen';
 import UploadScreen from './src/screens/UploadScreen';
 import ConfirmScreen from './src/screens/ConfirmScreen';
+import ApplicationDetailsScreen from './src/screens/ApplicationDetailsScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import JobFeedScreen from './src/screens/JobFeedScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
@@ -113,6 +114,7 @@ export default function App() {
           <RootStack.Screen name="Splash" component={SplashScreen} />
           <RootStack.Screen name="Upload" component={UploadScreen} />
           <RootStack.Screen name="Confirm" component={ConfirmScreen} />
+          <RootStack.Screen name="ApplicationDetails" component={ApplicationDetailsScreen} />
           <RootStack.Screen name="Main" component={MainTabs} />
           <RootStack.Screen
             name="Browser"

@@ -45,6 +45,18 @@ function findEl(id) {
   return null;
 }
 
+// Stamp an element the moment WE are about to change it, so the correction
+// listener can tell our own synthetic input/change events from a real user
+// edit. A window rather than a flag because the async widget paths
+// (tryButtonDropdownFill, tryPlacesComboboxFill, tryComboboxFill) dispatch
+// seconds after fillOne returns, and because the events that finally fire are
+// often dispatched by the PAGE's own handlers reacting to our click, not by us.
+// Element-scoped rather than global, so a genuine edit to a different field
+// during a fill is still learned.
+function afMarkFilled(el) {
+  try { if (el) el.__afFilledAt = Date.now(); } catch (e) {}
+}
+
 function isContentEditable(el) {
   if (!el || el.nodeType !== 1) return false;
   var ce = el.getAttribute && el.getAttribute('contenteditable');
@@ -194,6 +206,7 @@ function clickCheckable(el, shouldBeChecked) {
   // Set checked state imperatively, then dispatch the events React/Vue
   // listen to. click() alone toggles unpredictably when state already matches.
   if (!el) return false;
+  afMarkFilled(el);
   try {
     if (typeof shouldBeChecked === 'boolean' && el.checked === shouldBeChecked) {
       // Already in target state; still fire change so any onChange runs.
@@ -458,6 +471,7 @@ function tryComboboxFill(el, value) {
 }
 
 function fillChips(el, values) {
+  afMarkFilled(el);
   fireFocus(el);
   var setter = nativeSetter(el);
   for (var i = 0; i < values.length; i++) {
@@ -474,6 +488,7 @@ function fillChips(el, values) {
 
 function fillOne(el, value) {
   if (!el) return false;
+  afMarkFilled(el);
   var strVal = String(value);
 
   // No-op kept so existing call sites stay untouched; visual highlight removed.
@@ -523,6 +538,19 @@ function fillOne(el, value) {
 }
 `;
 
+// Pure merge for the per-field outcomes map: later results win. Extracted
+// so BrowserScreen's several fill passes (fast, AI, dropdown-resolution,
+// corrections — each of which may re-touch the same af-id) can be tested
+// without executing a generated script or rendering the component. Later
+// callers intentionally overwrite earlier ones: e.g. a field the fast pass
+// marks 'control-failed' because the raw profile value didn't match any
+// option, which the dropdown-resolution pass then fills successfully via
+// buildDirectFillScript, must end up 'filled', not stuck at the stale
+// earlier verdict.
+export function mergeFillOutcomes(prev, incoming) {
+  return { ...(prev || {}), ...(incoming || {}) };
+}
+
 export function buildDirectFillScript(valuesById) {
   return `
 (function() {
@@ -530,14 +558,211 @@ export function buildDirectFillScript(valuesById) {
   ${FILLER_RUNTIME}
 
   var filled = 0;
+  var outcomes = {};
   Object.keys(values).forEach(function(id) {
     var el = findEl(id);
-    if (!el) return;
-    if (fillOne(el, values[id])) filled++;
+    if (!el) { outcomes[id] = 'control-failed'; return; }
+    if (fillOne(el, values[id])) { filled++; outcomes[id] = 'filled'; }
+    else outcomes[id] = 'control-failed';
   });
   if (window.ReactNativeWebView) {
-    window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'AI_FILL_COMPLETE', filled: filled }));
+    window.ReactNativeWebView.postMessage(JSON.stringify({
+      type: 'AI_FILL_COMPLETE', filled: filled, outcomes: outcomes
+    }));
   }
+})();
+  `;
+}
+
+// Opens each combobox in turn and reports the options its listbox renders.
+//
+// React-Select and similar widgets create their listbox only on open, so the
+// options simply do not exist at scan time — this is why resolveLocally skipped
+// these fields entirely (isDropdown requires a non-empty options array).
+// Opening is serial because focusing one combobox closes another.
+//
+// `generation` is echoed back in the COMBOBOX_OPTIONS message so
+// harvestCoordinator can discard a late reply from a superseded run instead
+// of handing one run's options to another.
+// Defaults to null (not 0) so a script built without a generation is treated
+// as untagged and accepted by deliver(), rather than looking like a reply from
+// a generation that can never be current.
+export function buildComboboxHarvestScript(fieldIds, generation = null) {
+  return `
+(function() {
+  var ids = ${safeJson(fieldIds || [])};
+  var generation = ${safeJson(generation)};
+  var results = {};
+
+  // In-page re-entrancy guard. Two step() loops running at once open menus
+  // over each other, which is exactly the condition that makes one widget's
+  // still-mounted listbox get read as the next widget's options. Expressed as
+  // a deadline rather than a boolean so a harvest that dies mid-flight (a page
+  // navigating out from under it) cannot block harvesting forever.
+  var nowTs = Date.now();
+  if (window.__AF_HARVEST_UNTIL__ && nowTs < window.__AF_HARVEST_UNTIL__) return;
+  window.__AF_HARVEST_UNTIL__ = nowTs + 30000;
+
+  ${FILLER_RUNTIME}
+
+  function post() {
+    window.__AF_HARVEST_UNTIL__ = 0;
+    if (window.ReactNativeWebView) {
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        type: 'COMBOBOX_OPTIONS', generation: generation, options: results
+      }));
+    }
+  }
+
+  // The listbox attributed to the PREVIOUS field. closeAny() is best-effort,
+  // so the previous widget's menu is frequently still mounted when the next
+  // one is read — reporting it again would attribute one combobox's options
+  // to another and can select an arbitrary answer on a real application.
+  var prevListbox = null;
+
+  var LISTBOX_SELECTOR =
+    '[role="listbox"]:not([aria-hidden="true"]), ' +
+    '[role="menu"]:not([aria-hidden="true"])';
+
+  // Search roots, nearest first: the element's own shadow root (Workday), then
+  // its document (same-origin iframe), then the top document. Mirrors the
+  // reach of FILLER_RUNTIME's findEl, which is what located the field.
+  function scopesOf(el) {
+    var roots = [];
+    try {
+      var r = el.getRootNode ? el.getRootNode() : null;
+      if (r && r.querySelectorAll) roots.push(r);
+    } catch (e) {}
+    try {
+      if (el.ownerDocument && roots.indexOf(el.ownerDocument) === -1) roots.push(el.ownerDocument);
+    } catch (e) {}
+    if (roots.indexOf(document) === -1) roots.push(document);
+    return roots;
+  }
+
+  // aria-controls / aria-owns names THIS field's popup, so it is authoritative
+  // — honoured even when it resolves to a node already read, because some
+  // widgets legitimately reuse one portal container for every menu.
+  function byAssociation(el, roots) {
+    var id = null;
+    try { id = el.getAttribute('aria-controls') || el.getAttribute('aria-owns'); } catch (e) {}
+    if (!id) return null;
+    for (var i = 0; i < roots.length; i++) {
+      var node = null;
+      try {
+        node = roots[i].getElementById ? roots[i].getElementById(id) : null;
+      } catch (e) {}
+      if (!node) continue;
+      try {
+        if (node.getAttribute && node.getAttribute('aria-hidden') === 'true') continue;
+      } catch (e) {}
+      return node;
+    }
+    return null;
+  }
+
+  function findListbox(el) {
+    var roots = scopesOf(el);
+    var assoc = byAssociation(el, roots);
+    if (assoc) return assoc;
+    for (var i = 0; i < roots.length; i++) {
+      var nodes = [];
+      try { nodes = roots[i].querySelectorAll(LISTBOX_SELECTOR); } catch (e) { nodes = []; }
+      for (var j = 0; j < nodes.length; j++) {
+        // An unassociated menu identical to the one the last field used is
+        // assumed stale rather than guessed to belong here. A missed harvest
+        // just leaves the field to the AI resolver; a wrong one picks a wrong
+        // answer on a live application.
+        if (prevListbox && nodes[j] === prevListbox) continue;
+        return nodes[j];
+      }
+    }
+    return null;
+  }
+
+  function readOptionsFrom(listbox) {
+    var out = [];
+    if (!listbox || !listbox.querySelectorAll) return out;
+    var nodes = [];
+    try {
+      nodes = listbox.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], li');
+    } catch (e) { return out; }
+    for (var i = 0; i < nodes.length; i++) {
+      var label = (nodes[i].innerText || nodes[i].textContent || '').trim();
+      if (!label) continue;
+      out.push({ value: nodes[i].getAttribute('data-value') || label, label: label });
+    }
+    return out;
+  }
+
+  // Retry loop modelled on waitForListbox, replacing the single 300ms shot the
+  // harvest used to take: React-Select routinely needs longer than that to
+  // mount its menu, and a miss silently dropped the field.
+  var MAX_ATTEMPTS = 8;
+  var INTERVAL_MS = 120;
+
+  function waitForOptions(el, done) {
+    var attempts = 0;
+    function poll() {
+      attempts++;
+      var lb = null;
+      try { lb = findListbox(el); } catch (e) {}
+      if (lb) {
+        var opts = readOptionsFrom(lb);
+        if (opts.length) { done(lb, opts); return; }
+      }
+      if (attempts >= MAX_ATTEMPTS) { done(null, []); return; }
+      setTimeout(poll, INTERVAL_MS);
+    }
+    setTimeout(poll, INTERVAL_MS);
+  }
+
+  function closeAny(el) {
+    try {
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+    } catch (e) {}
+    try { el.blur(); } catch (e) {}
+  }
+
+  function step(i) {
+    if (i >= ids.length) { post(); return; }
+    var afId = ids[i];
+    // findEl comes from FILLER_RUNTIME: it walks shadow roots and same-origin
+    // iframes. The harvest used to duplicate a plain document.querySelector,
+    // which silently dropped every combobox formScanner had tagged inside a
+    // shadow root or an iframe (i.e. all of Workday).
+    var el = null;
+    try { el = findEl(afId); } catch (e) {}
+    if (!el) { step(i + 1); return; }
+
+    // Native <select> already carries its options; no need to open anything.
+    if (el.tagName === 'SELECT' && el.options) {
+      var nat = [];
+      for (var k = 0; k < el.options.length; k++) {
+        nat.push({ value: el.options[k].value, label: (el.options[k].text || '').trim() });
+      }
+      results[afId] = nat;
+      step(i + 1);
+      return;
+    }
+
+    try {
+      el.focus();
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
+    } catch (e) {}
+
+    waitForOptions(el, function(listbox, opts) {
+      if (opts.length) {
+        results[afId] = opts;
+        prevListbox = listbox;
+      }
+      closeAny(el);
+      setTimeout(function() { step(i + 1); }, 60);
+    });
+  }
+
+  step(0);
 })();
   `;
 }
@@ -579,6 +804,7 @@ export function buildFillScript(mapping, profileJson, fields, optionSelections =
   var CHIP_KEYS = { skills: true, languages: true };
 
   var filled = 0;
+  var outcomes = {};
   Object.keys(mapping).forEach(function(fieldId) {
     var profileKey = mapping[fieldId];
     if (!profileKey) return;
@@ -594,61 +820,139 @@ export function buildFillScript(mapping, profileJson, fields, optionSelections =
     if (optionSelections[fieldId] !== undefined && optionSelections[fieldId] !== null && optionSelections[fieldId] !== '') {
       val = optionSelections[fieldId];
     }
-    if (val === undefined || val === null || val === '') return;
+    if (val === undefined || val === null || val === '') { outcomes[fieldId] = 'no-value'; return; }
 
     // Radio / checkbox group: routed via options[], not a single el.
     var meta = groupMeta[fieldId];
     if (meta && meta.widget === 'radio-group') {
-      if (fillRadioGroup(meta.options, val)) filled++;
+      if (fillRadioGroup(meta.options, val)) { filled++; outcomes[fieldId] = 'filled'; }
+      else outcomes[fieldId] = 'control-failed';
       return;
     }
     if (meta && meta.widget === 'checkbox-group') {
-      if (fillCheckboxGroup(meta.options, val)) filled++;
+      if (fillCheckboxGroup(meta.options, val)) { filled++; outcomes[fieldId] = 'filled'; }
+      else outcomes[fieldId] = 'control-failed';
       return;
     }
 
     var el = findEl(fieldId);
-    if (!el) return;
+    if (!el) { outcomes[fieldId] = 'control-failed'; return; }
 
     if (CHIP_KEYS[profileKey] && (el.getAttribute('role') === 'combobox' ||
         el.getAttribute('aria-haspopup') === 'listbox')) {
       var values = String(val).split(',').map(function(s) { return s.trim(); }).filter(Boolean);
       fillChips(el, values);
       filled++;
+      outcomes[fieldId] = 'filled';
       return;
     }
 
-    if (fillOne(el, val)) filled++;
+    if (fillOne(el, val)) { filled++; outcomes[fieldId] = 'filled'; }
+    else outcomes[fieldId] = 'control-failed';
   });
 
   if (window.ReactNativeWebView) {
-    window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'FILL_COMPLETE', filled: filled }));
+    window.ReactNativeWebView.postMessage(JSON.stringify({
+      type: 'FILL_COMPLETE', filled: filled, outcomes: outcomes
+    }));
   }
 })();
   `;
 }
 
+// How long after WE touched an element its input/change events are treated as
+// ours rather than the user's. Covers the slowest async fill path
+// (tryButtonDropdownFill: waitForListbox 12 x 150ms, then a click the page
+// reacts to). Nothing is lost by being generous: an element inside this window
+// was, by definition, just auto-filled, and BrowserScreen already discards
+// USER_INPUT_DETECTED for auto-filled fields.
+const SYNTHETIC_FILL_WINDOW_MS = 5000;
+
+// `filledAfIds` is merged into a page-level set rather than closed over, and
+// re-injection updates that set even though the DOM listeners are installed
+// only once. Passing a fresh snapshot on each pass is how the AI pass,
+// dropdown-resolution pass, correction replay and AI drafts get represented —
+// previously only the fast pass's ids were ever known.
 export function buildCorrectionListenerScript(filledAfIds) {
   const filledMap = Object.fromEntries((filledAfIds || []).map(id => [id, true]));
   return `
 (function() {
+  var incoming = ${safeJson(filledMap)};
+  if (!window.__AF_FILLED_IDS__) window.__AF_FILLED_IDS__ = {};
+  var incomingKeys = Object.keys(incoming);
+  for (var n = 0; n < incomingKeys.length; n++) {
+    window.__AF_FILLED_IDS__[incomingKeys[n]] = true;
+  }
+  // Listeners are capture-phase and global; installing them twice would double
+  // every report. The id set above is refreshed on every injection regardless.
   if (window.__AF_CORRECTION_LISTENER__) return;
   window.__AF_CORRECTION_LISTENER__ = true;
-  var filled = ${safeJson(filledMap)};
-  document.addEventListener('blur', function(e) {
-    var el = e.target;
+
+  // setSelectVal, clickCheckable and setNativeInput all dispatch synthetic
+  // 'change' events while filling, and this listener is capture-phase, so it
+  // saw every one of them as a user correction — then replayed them onto
+  // future forms. The wasAutoFilled guard did not cover it: that only knew the
+  // fast pass's ids, and on a re-entrant run the __AF_CORRECTION_LISTENER__
+  // guard meant the already-installed listener never learned the new ones.
+  function isSyntheticFill(el) {
+    try {
+      var t = el && el.__afFilledAt;
+      return !!t && (Date.now() - t) < ${SYNTHETIC_FILL_WINDOW_MS};
+    } catch (e) { return false; }
+  }
+
+  function report(el, value) {
     var afId = el.getAttribute && el.getAttribute('data-af-id');
-    if (!afId) return;
-    var value = (el.value || el.textContent || '').trim();
-    if (!value) return;
+    if (!afId || !value) return;
+    if (isSyntheticFill(el)) return;
     if (window.ReactNativeWebView) {
       window.ReactNativeWebView.postMessage(JSON.stringify({
         type: 'USER_INPUT_DETECTED',
         afId: afId,
         value: value,
-        wasAutoFilled: !!filled[afId],
+        wasAutoFilled: !!(window.__AF_FILLED_IDS__ && window.__AF_FILLED_IDS__[afId]),
       }));
     }
+  }
+
+  // Text-like controls settle on blur.
+  document.addEventListener('blur', function(e) {
+    var el = e.target;
+    if (!el || !el.getAttribute) return;
+    var value = (el.value || el.textContent || '').trim();
+    report(el, value);
+  }, true);
+
+  // Checkboxes, radios and selects never blur meaningfully, so the answer the
+  // user chose was previously never learned. 'change' is where they commit.
+  document.addEventListener('change', function(e) {
+    var el = e.target;
+    if (!el || !el.getAttribute) return;
+    var type = (el.type || '').toLowerCase();
+    var value = '';
+
+    if (type === 'checkbox' || type === 'radio') {
+      // Only learn checked state. Unchecking is not learned because (1) it would
+      // require storing a separate "off" value, but the replay path (buildFillScript
+      // -> fillOne) has no logic to set .checked = false based on a stored value,
+      // and (2) for checkbox groups, only the checked option is semantically meaningful.
+      // Standalone boolean checkboxes don't round-trip correctly through the existing
+      // replay system, which only sets .value, not .checked. Changing this would
+      // require redesigning either the storage format or the replay path.
+      if (!el.checked) return;
+      var lid = el.getAttribute('id');
+      var lab = null;
+      if (lid) { try { lab = document.querySelector('label[for="' + lid + '"]'); } catch (err) {} }
+      if (!lab && el.closest) lab = el.closest('label');
+      value = lab ? (lab.innerText || lab.textContent || '').trim() : (el.value || '').trim();
+    } else if (el.tagName === 'SELECT') {
+      var sel = el.options && el.options[el.selectedIndex];
+      value = sel ? (sel.text || sel.value || '').trim() : '';
+    } else {
+      value = (el.value || '').trim();
+    }
+
+    report(el, value);
   }, true);
 })();
   `;

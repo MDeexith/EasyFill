@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Btn, IconBtn, Chip, Eyebrow, T } from '../components/ui';
 import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
-import { loadProfile, saveProfile, setOnboarded } from '../profile/store';
+import { loadProfile, saveProfile } from '../profile/store';
 import { PROFILE_FIELD_LABELS } from '../profile/schema';
 
 const CORE_FIELDS = [
@@ -24,8 +24,9 @@ export default function ConfirmScreen({ navigation }) {
 
   const handleContinue = useCallback(() => {
     saveProfile(profile);
-    setOnboarded(true);
-    navigation.replace('Main');
+    // setOnboarded now happens in ApplicationDetails, so a user who quits
+    // mid-setup is returned to onboarding rather than a half-filled profile.
+    navigation.replace('ApplicationDetails');
   }, [profile, navigation]);
 
   return (
