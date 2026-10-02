@@ -5,9 +5,9 @@ from typing import Any, Optional
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from openrouter import generate
+from groq_client import generate
 
 router = APIRouter()
 
@@ -21,6 +21,8 @@ class GenerateRequest(BaseModel):
     nearby: Optional[str] = ""
     host: Optional[str] = ""
     resumeText: Optional[str] = ""
+    jobDescription: Optional[str] = ""
+    wordLimit: int = Field(default=120, ge=1, le=500)
 
 
 def format_profile(profile: dict) -> str:
@@ -58,6 +60,8 @@ async def generate_answer(body: GenerateRequest):
         PROMPT_TEMPLATE
         .replace("{{PROFILE}}", format_profile(body.profile))
         .replace("{{RESUME_TEXT}}", resume_context or "(not provided)")
+        .replace("{{JOB_DESCRIPTION}}", body.jobDescription or "(not provided)")
+        .replace("{{WORD_LIMIT}}", str(body.wordLimit))
         .replace("{{LABEL}}", body.label or "(none)")
         .replace("{{PLACEHOLDER}}", body.placeholder or "(none)")
         .replace("{{NEARBY}}", body.nearby or "(none)")

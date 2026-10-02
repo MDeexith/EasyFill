@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import JSONResponse
 
-from openrouter import generate
+from groq_client import generate
 
 from resume_extractor import extract_text_from_pdf_bytes, extract_profile_from_text, extract_hyperlinks_from_pdf_bytes
 

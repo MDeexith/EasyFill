@@ -3,7 +3,7 @@ import axios from 'axios';
 let BASE_URL = 'https://easyfill.onrender.com';
 
 // Every LLM-backed route shares one budget. Allow the backend's 80s
-// OpenRouter call to finish, with extra time for request/response overhead.
+// Groq call to finish, with extra time for request/response overhead.
 const LLM_TIMEOUT = 90000;
 
 export function setBackendUrl(url) {
@@ -47,9 +47,10 @@ export async function selectOptions(items) {
   return res.data.selections || {};
 }
 
-export async function generateText({ profile, label, placeholder, nearby, host }) {
+export async function generateText({ profile, label, placeholder, nearby, host, resumeText, jobDescription, wordLimit }) {
   const res = await axios.post(`${BASE_URL}/generate`, {
     profile: redactSensitive(profile), label, placeholder, nearby, host,
+    resumeText, jobDescription, wordLimit,
   }, { timeout: LLM_TIMEOUT });
   return res.data.text;
 }

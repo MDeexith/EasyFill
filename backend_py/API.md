@@ -89,7 +89,7 @@ Content-Type: application/json
 | Status | Body | Reason |
 |---|---|---|
 | `400` | `{ "error": {...} }` | Invalid request body |
-| `500` | `{ "error": "LLM call failed" }` | OpenRouter unreachable or model error |
+| `500` | `{ "error": "LLM call failed" }` | Groq unreachable or model error |
 
 ---
 
@@ -221,6 +221,9 @@ Content-Type: application/json
 | `placeholder` | `string` | ❌ | Field placeholder text |
 | `nearby` | `string` | ❌ | Text near the field on the page for context |
 | `host` | `string` | ❌ | Company name or website domain |
+| `resumeText` | `string` | ❌ | Raw résumé text; otherwise reconstructed from the profile |
+| `jobDescription` | `string` | ❌ | Job description sent with the résumé and question in one call |
+| `wordLimit` | `integer` | ❌ | Requested maximum answer length, 1–500 words (default: 120) |
 
 **Sample request:**
 ```json
@@ -256,7 +259,7 @@ Content-Type: application/json
 | Status | Body | Reason |
 |---|---|---|
 | `400` | `{ "error": {...} }` | Invalid request body |
-| `500` | `{ "error": "LLM call failed" }` | OpenRouter unreachable or model error |
+| `500` | `{ "error": "LLM call failed" }` | Groq unreachable or model error |
 
 ---
 
@@ -523,6 +526,7 @@ GET /jobs/sources/remotive?category=Engineering&search=backend
 
 | Variable | Required | Description |
 |---|---|---|
-| `OPENROUTER_API_KEY` | ✅ | OpenRouter API key for LLM endpoints |
+| `GROQ_API_KEY` | ✅ | Groq API key for LLM endpoints |
+| `GROQ_MODEL` | ❌ | Groq GPT-OSS model (default: `openai/gpt-oss-120b`), called with low reasoning effort |
 
 | `PORT` | ❌ | Server port (default: `3001`) |
