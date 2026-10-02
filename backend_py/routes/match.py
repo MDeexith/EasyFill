@@ -66,7 +66,7 @@ async def match_fields(body: MatchRequest):
     )
 
     try:
-        raw = await generate(prompt, allow_fastrouter_fallback=True)
+        raw = await generate(prompt)
         json_str = re.sub(r"^```[a-z]*\n?", "", raw)
         json_str = re.sub(r"\n?```$", "", json_str)
         parsed = json.loads(json_str)

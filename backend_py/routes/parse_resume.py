@@ -59,7 +59,7 @@ async def _extract_hyperlinks(pdf_bytes: bytes) -> dict:
 async def _run_ai(text: str) -> dict:
     try:
         prompt = PROMPT_TEMPLATE.replace("{{RESUME_TEXT}}", text[:10000])
-        raw = await generate(prompt, allow_fastrouter_fallback=True)
+        raw = await generate(prompt)
         s = re.sub(r"^```[a-z]*\n?", "", raw)
         s = re.sub(r"\n?```$", "", s)
         try:
@@ -143,7 +143,7 @@ async def _derive_state(city: str, country: str) -> str:
             'Use 2-letter abbreviation for US states (e.g. CA). '
             'For other countries use the full state/province name (e.g. Maharashtra).'
         )
-        result = await generate(prompt, allow_fastrouter_fallback=True)
+        result = await generate(prompt)
         return result.strip().strip('."\'')
     except Exception:
         return ""

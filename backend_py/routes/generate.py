@@ -65,7 +65,7 @@ async def generate_answer(body: GenerateRequest):
     )
 
     try:
-        raw = await generate(prompt, allow_fastrouter_fallback=True)
+        raw = await generate(prompt)
         text = re.sub(r"^```[a-z]*\n?", "", raw, flags=re.IGNORECASE)
         text = re.sub(r"\n?```$", "", text)
         text = re.sub(r'^["\']|["\']$', "", text).strip()
