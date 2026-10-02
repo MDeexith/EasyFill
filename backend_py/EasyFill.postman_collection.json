@@ -1,12 +1,28 @@
 {
   "info": {
-    "name": "EasyFill Python Backend",
+    "name": "EasyFill Backend API Tests",
+    "description": "Tests every application endpoint exposed by backend_py/main.py. Set base_url to your server (default http://localhost:3001), start the backend with OPENROUTER_API_KEY, and run the collection. Run from the repository root so Postman can read backend_py/fixtures/sample-resume.pdf; if Postman cannot resolve it, select that PDF manually in the Parse Resume requests. Increase the Postman request timeout to at least 90000 ms for OpenRouter calls and slower job-source requests. Source endpoints may return empty job arrays when upstream services have no results or are unavailable; tests check API response shape rather than requiring a minimum count. POST /jobs/companies adds a sample handle to the in-memory company list, and POST /jobs/refresh clears the in-memory JobSpy cache. The /docs, /redoc and /openapi.json URLs are FastAPI documentation endpoints and are included too.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     {
       "key": "base_url",
       "value": "http://localhost:3001",
+      "type": "string"
+    },
+    {
+      "key": "search",
+      "value": "engineer",
+      "type": "string"
+    },
+    {
+      "key": "greenhouse_company",
+      "value": "stripe",
+      "type": "string"
+    },
+    {
+      "key": "new_company",
+      "value": "postman-example-board",
       "type": "string"
     }
   ],
@@ -19,25 +35,212 @@
           "request": {
             "method": "GET",
             "url": "{{base_url}}/health"
-          }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Server is healthy\", function () { pm.expect(data.status === \"ok\").to.eql(true); });"
+                ]
+              }
+            }
+          ]
         }
       ]
     },
     {
-      "name": "Match",
+      "name": "OpenRouter",
       "item": [
         {
-          "name": "POST /match",
+          "name": "POST /match/",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
             "url": "{{base_url}}/match/",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"fields\": [\n    {\n      \"id\": \"inp_1\",\n      \"name\": \"email\",\n      \"label\": \"Email address\",\n      \"type\": \"email\"\n    },\n    {\n      \"id\": \"inp_2\",\n      \"name\": \"fname\",\n      \"label\": \"First Name\",\n      \"type\": \"text\"\n    },\n    {\n      \"id\": \"inp_3\",\n      \"name\": \"lname\",\n      \"label\": \"Last Name\",\n      \"type\": \"text\"\n    },\n    {\n      \"id\": \"inp_4\",\n      \"name\": \"phone\",\n      \"label\": \"Phone Number\",\n      \"type\": \"tel\"\n    },\n    {\n      \"id\": \"inp_5\",\n      \"name\": \"linkedin\",\n      \"label\": \"LinkedIn Profile URL\",\n      \"type\": \"url\"\n    }\n  ],\n  \"profile\": {\n    \"firstName\": \"Jane\",\n    \"lastName\": \"Doe\",\n    \"email\": \"jane@example.com\",\n    \"phone\": \"+1-555-000-1234\",\n    \"linkedIn\": \"https://linkedin.com/in/janedoe\",\n    \"city\": \"San Francisco\",\n    \"state\": \"CA\"\n  }\n}",
-              "options": { "raw": { "language": "json" } }
+              "raw": "{\n  \"fields\": [\n    {\n      \"id\": \"email\",\n      \"name\": \"email\",\n      \"label\": \"Email address\",\n      \"type\": \"email\"\n    },\n    {\n      \"id\": \"first_name\",\n      \"name\": \"firstName\",\n      \"label\": \"First name\",\n      \"type\": \"text\"\n    }\n  ],\n  \"profile\": {\n    \"firstName\": \"Jane\",\n    \"lastName\": \"Doe\",\n    \"email\": \"jane@example.com\",\n    \"phone\": \"+1-555-000-1234\",\n    \"linkedIn\": \"https://linkedin.com/in/janedoe\",\n    \"currentTitle\": \"Software Engineer\",\n    \"skills\": \"Python, React\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             }
-          }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"mapping is object\", function () { pm.expect(typeof data.mapping === \"object\").to.eql(true); });",
+                  "pm.test(\"decisions is object\", function () { pm.expect(typeof data.decisions === \"object\").to.eql(true); });",
+                  "pm.test(\"Mapping and decisions have the same field IDs\", function () { pm.expect(Object.keys(data.mapping).every(function (id) { return data.decisions[id] && data.decisions[id].key === data.mapping[id]; })).to.eql(true); });",
+                  "pm.test(\"Email field maps to email\", function () { pm.expect(data.mapping.email === \"email\").to.eql(true); });",
+                  "pm.test(\"First name field maps to firstName\", function () { pm.expect(data.mapping.first_name === \"firstName\").to.eql(true); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /generate/",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/generate/",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"profile\": {\n    \"firstName\": \"Jane\",\n    \"lastName\": \"Doe\",\n    \"email\": \"jane@example.com\",\n    \"phone\": \"+1-555-000-1234\",\n    \"linkedIn\": \"https://linkedin.com/in/janedoe\",\n    \"currentTitle\": \"Software Engineer\",\n    \"skills\": \"Python, React\"\n  },\n  \"label\": \"Why are you a good fit for this role?\",\n  \"placeholder\": \"Your answer\",\n  \"nearby\": \"Software engineer application\",\n  \"host\": \"example.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Generated text is a nonempty string\", function () { pm.expect(typeof data.text === \"string\" && data.text.trim().length > 0).to.eql(true); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /select-option/",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/select-option/",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"fieldId\": \"work_auth\",\n      \"label\": \"Work authorization\",\n      \"profileKey\": \"workAuthorization\",\n      \"profileValue\": \"Yes\",\n      \"options\": [\n        {\n          \"value\": \"yes\",\n          \"label\": \"Yes\"\n        },\n        {\n          \"value\": \"no\",\n          \"label\": \"No\"\n        }\n      ]\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Selections is an object\", function () { pm.expect(data.selections !== null && typeof data.selections === \"object\" && !Array.isArray(data.selections)).to.eql(true); });",
+                  "pm.test(\"Each selection is a string\", function () { pm.expect(Object.values(data.selections).every(function (value) { return typeof value === \"string\"; })).to.eql(true); });",
+                  "pm.test(\"Work authorization selects Yes\", function () { pm.expect(data.selections.work_auth === \"Yes\").to.eql(true); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /select-option/ (empty list)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/select-option/",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": []\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"No selections for empty input\", function () { pm.expect(Object.keys(data.selections).length === 0).to.eql(true); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /match/ (invalid body)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/match/",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fields\": [\n    {}\n  ],\n  \"profile\": {\n    \"firstName\": \"Jane\",\n    \"lastName\": \"Doe\",\n    \"email\": \"jane@example.com\",\n    \"phone\": \"+1-555-000-1234\",\n    \"linkedIn\": \"https://linkedin.com/in/janedoe\",\n    \"currentTitle\": \"Software Engineer\",\n    \"skills\": \"Python, React\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", function () { pm.response.to.have.status(422); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Validation details are returned\", function () { pm.expect(Array.isArray(data.detail) && data.detail.length > 0).to.eql(true); });"
+                ]
+              }
+            }
+          ]
         }
       ]
     },
@@ -48,6 +251,39 @@
           "name": "POST /parse-resume",
           "request": {
             "method": "POST",
+            "url": "{{base_url}}/parse-resume",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "backend_py/fixtures/sample-resume.pdf",
+                  "description": "Select backend_py/fixtures/sample-resume.pdf if your Postman working directory differs."
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Profile is an object\", function () { pm.expect(data.profile !== null && typeof data.profile === \"object\" && !Array.isArray(data.profile)).to.eql(true); });",
+                  "pm.test(\"Resume text is present\", function () { pm.expect(typeof data.resumeText === \"string\" && data.resumeText.includes(\"Jane Doe\")).to.eql(true); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /parse-resume/ (alias)",
+          "request": {
+            "method": "POST",
             "url": "{{base_url}}/parse-resume/",
             "body": {
               "mode": "formdata",
@@ -55,207 +291,440 @@
                 {
                   "key": "file",
                   "type": "file",
-                  "src": "",
-                  "description": "Select a PDF or image resume file from your machine"
+                  "src": "backend_py/fixtures/sample-resume.pdf",
+                  "description": "Select backend_py/fixtures/sample-resume.pdf if your Postman working directory differs."
                 }
               ]
             }
-          }
-        }
-      ]
-    },
-    {
-      "name": "Generate",
-      "item": [
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Profile is an object\", function () { pm.expect(data.profile !== null && typeof data.profile === \"object\" && !Array.isArray(data.profile)).to.eql(true); });",
+                  "pm.test(\"Resume text is present\", function () { pm.expect(typeof data.resumeText === \"string\" && data.resumeText.includes(\"Jane Doe\")).to.eql(true); });"
+                ]
+              }
+            }
+          ]
+        },
         {
-          "name": "POST /generate — cover letter body",
+          "name": "POST /parse-resume (missing file)",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{base_url}}/generate/",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"profile\": {\n    \"firstName\": \"Jane\",\n    \"lastName\": \"Doe\",\n    \"currentTitle\": \"Senior Software Engineer\",\n    \"currentCompany\": \"Acme Corp\",\n    \"yearsExperience\": 6,\n    \"skills\": \"Python, TypeScript, React, PostgreSQL, AWS\"\n  },\n  \"label\": \"Cover Letter\",\n  \"placeholder\": \"Tell us why you want to work here...\",\n  \"nearby\": \"Why are you a good fit for this role?\",\n  \"host\": \"stripe.com\"\n}",
-              "options": { "raw": { "language": "json" } }
+            "url": "{{base_url}}/parse-resume"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", function () { pm.response.to.have.status(422); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Missing file is reported\", function () { pm.expect(Array.isArray(data.detail) && data.detail.some(function (entry) { return entry.loc && entry.loc.includes(\"file\"); })).to.eql(true); });"
+                ]
+              }
             }
-          }
-        },
-        {
-          "name": "POST /generate — short answer",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": "{{base_url}}/generate/",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"profile\": {\n    \"firstName\": \"Jane\",\n    \"currentTitle\": \"Senior Software Engineer\",\n    \"skills\": \"Python, TypeScript, React\",\n    \"yearsExperience\": 6\n  },\n  \"label\": \"What is your greatest strength?\",\n  \"placeholder\": \"\",\n  \"nearby\": \"\",\n  \"host\": \"lever.co\"\n}",
-              "options": { "raw": { "language": "json" } }
-            }
-          }
+          ]
         }
       ]
     },
     {
-      "name": "Jobs — Feed (existing scrapers)",
+      "name": "Jobs - Source APIs",
       "item": [
         {
-          "name": "GET /jobs/feed — all sources",
+          "name": "GET /jobs/sources/jobicy",
           "request": {
             "method": "GET",
-            "url": {
-              "raw": "{{base_url}}/jobs/feed?page=1",
-              "host": ["{{base_url}}"],
-              "path": ["jobs", "feed"],
-              "query": [
-                { "key": "page", "value": "1" }
-              ]
+            "url": "{{base_url}}/jobs/sources/jobicy?search={{search}}&count=10"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Jobicy response\", function () { pm.expect(data.source === \"jobicy\" && Array.isArray(data.jobs) && data.count === data.jobs.length).to.eql(true); });"
+                ]
+              }
             }
-          }
+          ]
         },
         {
-          "name": "GET /jobs/feed — search + category",
+          "name": "GET /jobs/sources/greenhouse",
           "request": {
             "method": "GET",
-            "url": {
-              "raw": "{{base_url}}/jobs/feed?search=frontend&category=Engineering&page=1",
-              "host": ["{{base_url}}"],
-              "path": ["jobs", "feed"],
-              "query": [
-                { "key": "search", "value": "frontend" },
-                { "key": "category", "value": "Engineering" },
-                { "key": "page", "value": "1" }
-              ]
+            "url": "{{base_url}}/jobs/sources/greenhouse?company={{greenhouse_company}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Greenhouse response\", function () { pm.expect(data.source === \"greenhouse\" && data.company === pm.collectionVariables.get(\"greenhouse_company\") && Array.isArray(data.jobs) && data.count === data.jobs.length).to.eql(true); });"
+                ]
+              }
             }
-          }
+          ]
         },
         {
-          "name": "GET /jobs/feed — remotive only",
+          "name": "GET /jobs/sources/remotive",
           "request": {
             "method": "GET",
-            "url": {
-              "raw": "{{base_url}}/jobs/feed?sources=remotive&page=1",
-              "host": ["{{base_url}}"],
-              "path": ["jobs", "feed"],
-              "query": [
-                { "key": "sources", "value": "remotive" },
-                { "key": "page", "value": "1" }
-              ]
+            "url": "{{base_url}}/jobs/sources/remotive?search={{search}}&category=Engineering"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Remotive response\", function () { pm.expect(data.source === \"remotive\" && Array.isArray(data.jobs) && data.count === data.jobs.length).to.eql(true); });"
+                ]
+              }
             }
-          }
+          ]
         }
       ]
     },
     {
-      "name": "Jobs — Companies",
+      "name": "Jobs - Feed",
+      "item": [
+        {
+          "name": "GET /jobs/feed (selected sources)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/jobs/feed?page=1&country=in&sources=jobicy%2Cremotive",
+            "description": "Uses two API sources so a collection run does not start all JobSpy scrapers."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Jobs array\", function () { pm.expect(Array.isArray(data.jobs)).to.eql(true); });",
+                  "pm.test(\"Pagination\", function () { pm.expect(typeof data.total === \"number\" && data.page === 1 && data.perPage === 10 && typeof data.hasMore === \"boolean\").to.eql(true); });",
+                  "pm.test(\"Page length\", function () { pm.expect(data.jobs.length <= data.perPage && data.total >= data.jobs.length).to.eql(true); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /jobs/feed (search/filter)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/jobs/feed?search={{search}}&category=Engineering&page=1&country=us&is_remote=true&sources=jobicy%2Cremotive"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Filtered jobs array\", function () { pm.expect(Array.isArray(data.jobs) && data.page === 1).to.eql(true); });",
+                  "pm.test(\"Every result is Engineering\", function () { pm.expect(data.jobs.every(function (job) { return job.category === \"Engineering\"; })).to.eql(true); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /jobs/feed (all sources)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/jobs/feed?page=1&country=in",
+            "description": "Queries all configured providers, including JobSpy scrapers and Greenhouse boards; may take longer."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"All-source feed shape\", function () { pm.expect(Array.isArray(data.jobs) && typeof data.total === \"number\" && data.perPage === 10).to.eql(true); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Jobs - Cache",
+      "item": [
+        {
+          "name": "GET /jobs/cache/status",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/jobs/cache/status"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Cache totals and entries\", function () { pm.expect(typeof data.total_cached_jobs === \"number\" && data.sources !== null && typeof data.sources === \"object\").to.eql(true); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /jobs/refresh",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/jobs/refresh",
+            "description": "Clears the in-memory JobSpy cache. This is safe for local test runs; subsequent feed calls may scrape again."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"JobSpy cache was cleared\", function () { pm.expect(data.ok === true && typeof data.cleared === \"number\").to.eql(true); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Jobs - Companies",
       "item": [
         {
           "name": "GET /jobs/companies",
           "request": {
             "method": "GET",
             "url": "{{base_url}}/jobs/companies"
-          }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Greenhouse company list\", function () { pm.expect(Array.isArray(data.greenhouse) && data.greenhouse.includes(\"stripe\")).to.eql(true); });"
+                ]
+              }
+            }
+          ]
         },
         {
-          "name": "POST /jobs/companies — add greenhouse",
+          "name": "POST /jobs/companies",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
             "url": "{{base_url}}/jobs/companies",
+            "description": "Adds a sample handle to this process only; rerunning this request is safe.",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"handle\": \"airbnb\",\n  \"platform\": \"greenhouse\"\n}",
-              "options": { "raw": { "language": "json" } }
+              "raw": "{\n  \"handle\": \"{{new_company}}\",\n  \"platform\": \"greenhouse\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             }
-          }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Company accepted\", function () { pm.expect(data.ok === true).to.eql(true); });"
+                ]
+              }
+            }
+          ]
         },
         {
-          "name": "POST /jobs/companies — add lever",
+          "name": "GET /jobs/companies (verify add)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/jobs/companies"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"New company is listed\", function () { pm.expect(Array.isArray(data.greenhouse) && data.greenhouse.includes(pm.collectionVariables.get(\"new_company\"))).to.eql(true); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /jobs/companies (invalid platform)",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
             "url": "{{base_url}}/jobs/companies",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"handle\": \"openai\",\n  \"platform\": \"lever\"\n}",
-              "options": { "raw": { "language": "json" } }
+              "raw": "{\n  \"handle\": \"example\",\n  \"platform\": \"lever\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             }
-          }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", function () { pm.response.to.have.status(400); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"Unsupported platform is rejected\", function () { pm.expect(data.error === \"platform must be 'greenhouse'\").to.eql(true); });"
+                ]
+              }
+            }
+          ]
         }
       ]
     },
     {
-      "name": "Jobs — JobSpy Scrape",
+      "name": "FastAPI Documentation",
       "item": [
         {
-          "name": "GET /jobs/scrape — Indeed + LinkedIn",
+          "name": "GET /openapi.json",
           "request": {
             "method": "GET",
-            "url": {
-              "raw": "{{base_url}}/jobs/scrape?search_term=software+engineer&location=San+Francisco%2C+CA&site_name=indeed%2Clinkedin&results_wanted=10&hours_old=72&country_indeed=USA",
-              "host": ["{{base_url}}"],
-              "path": ["jobs", "scrape"],
-              "query": [
-                { "key": "search_term", "value": "software engineer" },
-                { "key": "location", "value": "San Francisco, CA" },
-                { "key": "site_name", "value": "indeed,linkedin" },
-                { "key": "results_wanted", "value": "10" },
-                { "key": "hours_old", "value": "72" },
-                { "key": "country_indeed", "value": "USA" }
-              ]
+            "url": "{{base_url}}/openapi.json"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Response is JSON\", function () { pm.response.json(); });",
+                  "var data = pm.response.json();",
+                  "pm.test(\"OpenAPI paths are present\", function () { pm.expect(Boolean(data.openapi && data.paths && data.paths[\"/health\"] && data.paths[\"/jobs/feed\"] && data.paths[\"/select-option/\"])).to.eql(true); });"
+                ]
+              }
             }
-          }
+          ]
         },
         {
-          "name": "GET /jobs/scrape — ZipRecruiter remote",
+          "name": "GET /docs",
           "request": {
             "method": "GET",
-            "url": {
-              "raw": "{{base_url}}/jobs/scrape?search_term=python+developer&site_name=zip_recruiter&results_wanted=15&is_remote=true",
-              "host": ["{{base_url}}"],
-              "path": ["jobs", "scrape"],
-              "query": [
-                { "key": "search_term", "value": "python developer" },
-                { "key": "site_name", "value": "zip_recruiter" },
-                { "key": "results_wanted", "value": "15" },
-                { "key": "is_remote", "value": "true" }
-              ]
+            "url": "{{base_url}}/docs"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"swagger-ui page is returned\", function () { pm.expect(pm.response.text().includes(\"swagger-ui\")).to.eql(true); });"
+                ]
+              }
             }
-          }
+          ]
         },
         {
-          "name": "GET /jobs/scrape — Google Jobs",
+          "name": "GET /redoc",
           "request": {
             "method": "GET",
-            "url": {
-              "raw": "{{base_url}}/jobs/scrape?site_name=google&google_search_term=software+engineer+jobs+near+New+York+since+yesterday&results_wanted=10",
-              "host": ["{{base_url}}"],
-              "path": ["jobs", "scrape"],
-              "query": [
-                { "key": "site_name", "value": "google" },
-                { "key": "google_search_term", "value": "software engineer jobs near New York since yesterday" },
-                { "key": "results_wanted", "value": "10" }
-              ]
+            "url": "{{base_url}}/redoc"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"redoc page is returned\", function () { pm.expect(pm.response.text().includes(\"redoc\")).to.eql(true); });"
+                ]
+              }
             }
-          }
+          ]
         },
         {
-          "name": "GET /jobs/scrape — fulltime filter",
+          "name": "GET /docs/oauth2-redirect",
           "request": {
             "method": "GET",
-            "url": {
-              "raw": "{{base_url}}/jobs/scrape?search_term=data+scientist&location=Austin%2C+TX&site_name=indeed&job_type=fulltime&results_wanted=20&country_indeed=USA",
-              "host": ["{{base_url}}"],
-              "path": ["jobs", "scrape"],
-              "query": [
-                { "key": "search_term", "value": "data scientist" },
-                { "key": "location", "value": "Austin, TX" },
-                { "key": "site_name", "value": "indeed" },
-                { "key": "job_type", "value": "fulltime" },
-                { "key": "results_wanted", "value": "20" },
-                { "key": "country_indeed", "value": "USA" }
-              ]
+            "url": "{{base_url}}/docs/oauth2-redirect"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"oauth2Redirect page is returned\", function () { pm.expect(pm.response.text().includes(\"oauth2Redirect\")).to.eql(true); });"
+                ]
+              }
             }
-          }
+          ]
         }
       ]
     }
