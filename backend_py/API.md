@@ -97,7 +97,7 @@ Content-Type: application/json
 
 ### `POST /parse-resume/`
 
-Upload a resume (PDF or image). Returns structured profile data extracted by the LLM.
+Upload a PDF resume (up to 10 MB). Returns structured profile data extracted from the PDF text using an LLM and deterministic fallback rules. Scanned PDFs without extractable text are not supported.
 
 **Headers:**
 ```
@@ -108,7 +108,7 @@ Content-Type: multipart/form-data
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `file` | `file` | ✅ | Resume file — PDF or image (PNG/JPG) |
+| `file` | `file` | ✅ | PDF resume, up to 10 MB |
 
 **Sample request (curl):**
 ```bash
@@ -148,7 +148,7 @@ curl -X POST http://localhost:3001/parse-resume/ \
 | `profile.education[].institution` | `string` | School/university name |
 | `profile.education[].degree` | `string` | Degree type |
 | `profile.education[].field` | `string` | Field of study |
-| `profile.education[].graduationYear` | `string` | Graduation year |
+| `profile.education[].year` | `string` | Graduation year |
 
 ```json
 {
@@ -172,7 +172,7 @@ curl -X POST http://localhost:3001/parse-resume/ \
         "company": "Acme Corp",
         "title": "Senior Software Engineer",
         "startDate": "2021-06",
-        "endDate": "Present",
+        "endDate": "",
         "description": "Led backend services for payments platform."
       }
     ],
@@ -181,7 +181,7 @@ curl -X POST http://localhost:3001/parse-resume/ \
         "institution": "IIT Bombay",
         "degree": "B.Tech",
         "field": "Computer Science",
-        "graduationYear": "2018"
+        "year": "2018"
       }
     ]
   }
@@ -192,8 +192,12 @@ curl -X POST http://localhost:3001/parse-resume/ \
 
 | Status | Body | Reason |
 |---|---|---|
-| `400` | `{ "error": "No file uploaded" }` | No file attached |
-| `500` | `{ "error": "Resume parsing failed" }` | LLM error or malformed response |
+| `400` | `{ "error": "Upload a valid PDF file" }` | File does not have a PDF header |
+| `413` | `{ "error": "PDF is too large (10 MB maximum)" }` | File exceeds the size limit |
+| `422` | Validation details | No file attached |
+| `422` | `{ "error": "Could not read PDF" }` or `{ "error": "PDF has no extractable text (scanned image PDF?)" }` | PDF is corrupt or has no text layer |
+| `422` | `{ "error": "Could not extract profile details from PDF" }` | Extracted text contained no usable profile details |
+| `500` | `{ "error": "Resume parsing failed" }` | Both AI and deterministic extraction failed |
 
 ---
 

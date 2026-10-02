@@ -91,7 +91,7 @@ export default function UploadScreen({ navigation }) {
       setState('idle');
       show({
         title: 'Parse failed',
-        message: 'Could not read your resume. Check your backend connection and try again.',
+        message: err.response?.data?.error || 'Could not read your resume. Check your backend connection and try again.',
         buttons: [{ text: 'OK' }],
       });
     }

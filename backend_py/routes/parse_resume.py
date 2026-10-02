@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import re
 from datetime import datetime
 from pathlib import Path
@@ -7,7 +8,6 @@ from pathlib import Path
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import JSONResponse
 
-# from ollama import generate
 from openrouter import generate
 
 from resume_extractor import extract_text_from_pdf_bytes, extract_profile_from_text, extract_hyperlinks_from_pdf_bytes
@@ -22,27 +22,84 @@ STRING_FIELDS = [
     "github", "currentTitle", "currentCompany", "skills",
     "workAuthorization", "languages",
 ]
-FLOAT_FIELDS = ["yearsExperience"]
 ARRAY_FIELDS = ["experience", "education"]
+ENTRY_FIELDS = {
+    "experience": ("title", "company", "location", "startDate", "endDate", "skills", "description"),
+    "education": ("institution", "degree", "field", "year", "startDate", "endDate"),
+}
+CONTACT_FIELDS = {"email", "phone", "linkedIn", "github", "portfolio"}
+MAX_PDF_BYTES = 10 * 1024 * 1024
 
 
-def _truthy(v) -> bool:
-    if isinstance(v, list): return len(v) > 0
-    if isinstance(v, int):  return v != 0
-    return bool(str(v).strip())
+def _clean_text(value) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _clean_years(value) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        years = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return years if math.isfinite(years) and 0 <= years <= 100 else 0.0
+
+
+def _clean_entries(value, kind: str) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    entries = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        entry = {key: _clean_text(raw.get(key)) for key in ENTRY_FIELDS[kind]}
+        if kind == "experience" and not (entry["title"] or entry["company"]):
+            continue
+        if kind == "education" and not (entry["institution"] or entry["degree"]):
+            continue
+        if kind == "experience" and entry["endDate"].lower() in ("present", "current", "now", "ongoing"):
+            entry["endDate"] = ""
+        for date_key in ("startDate", "endDate"):
+            date = entry[date_key]
+            if date:
+                try:
+                    entry[date_key] = datetime.strptime(date, "%Y-%m").strftime("%Y-%m")
+                except ValueError:
+                    entry[date_key] = ""
+        entries.append(entry)
+    return entries
+
+
+def _same_entry(a: dict, b: dict, kind: str) -> bool:
+    identity = ("title", "company", "startDate") if kind == "experience" else ("institution", "degree", "year")
+    shared = [key for key in identity if a[key] and b[key]]
+    return bool(shared) and all(a[key].casefold() == b[key].casefold() for key in shared)
+
+
+def _merge_entries(ai_value, regex_value, kind: str) -> list[dict]:
+    merged = _clean_entries(ai_value, kind)
+    for fallback in _clean_entries(regex_value, kind):
+        matches = [entry for entry in merged if _same_entry(entry, fallback, kind)]
+        if len(matches) == 1:
+            for key in ENTRY_FIELDS[kind]:
+                if not matches[0][key]:
+                    matches[0][key] = fallback[key]
+        else:
+            merged.append(fallback)
+    return merged
 
 
 def _merge(ai: dict, regex: dict) -> dict:
+    ai = ai if isinstance(ai, dict) else {}
+    regex = regex if isinstance(regex, dict) else {}
     merged = {}
     for f in STRING_FIELDS:
-        merged[f] = ai.get(f, "") if _truthy(ai.get(f, "")) else regex.get(f, "")
-    for f in FLOAT_FIELDS:
-        ai_val = ai.get(f, 0)
-        merged[f] = float(ai_val) if _truthy(ai_val) else float(regex.get(f, 0))
+        ai_value = _clean_text(ai.get(f))
+        regex_value = _clean_text(regex.get(f))
+        merged[f] = (regex_value or ai_value) if f in CONTACT_FIELDS else (ai_value or regex_value)
+    merged["yearsExperience"] = _clean_years(ai.get("yearsExperience")) or _clean_years(regex.get("yearsExperience"))
     for f in ARRAY_FIELDS:
-        entries = ai.get(f, []) if _truthy(ai.get(f, [])) else regex.get(f, [])
-        # Drop empty template-echo entries (models sometimes emit the blank example object)
-        merged[f] = [e for e in entries if isinstance(e, dict) and any(_truthy(v) for v in e.values())]
+        merged[f] = _merge_entries(ai.get(f), regex.get(f), f)
     return merged
 
 
@@ -60,16 +117,20 @@ async def _run_ai(text: str) -> dict:
     try:
         prompt = PROMPT_TEMPLATE.replace("{{RESUME_TEXT}}", text[:10000])
         raw = await generate(prompt)
-        s = re.sub(r"^```[a-z]*\n?", "", raw)
+        s = re.sub(r"^```[a-z]*\n?", "", raw.strip(), flags=re.I)
         s = re.sub(r"\n?```$", "", s)
         try:
-            return json.loads(s)
+            parsed = json.loads(s)
         except json.JSONDecodeError:
             # Some models wrap the JSON in prose — extract the outermost {...} block
             start, end = s.find("{"), s.rfind("}")
             if start != -1 and end > start:
-                return json.loads(s[start:end + 1])
-            raise
+                parsed = json.loads(s[start:end + 1])
+            else:
+                raise
+        if not isinstance(parsed, dict):
+            raise ValueError("AI response is not a profile object")
+        return parsed
     except Exception as e:
         print(f"[ai extractor] failed: {e}")
         return {}
@@ -86,10 +147,11 @@ async def _run_regex(text: str) -> dict:
 @router.post("/")
 @router.post("")
 async def parse_resume(file: UploadFile = File(...)):
-    if not file:
-        return JSONResponse(status_code=400, content={"error": "No file uploaded"})
-
-    contents = await file.read()
+    contents = await file.read(MAX_PDF_BYTES + 1)
+    if len(contents) > MAX_PDF_BYTES:
+        return JSONResponse(status_code=413, content={"error": "PDF is too large (10 MB maximum)"})
+    if not contents.startswith(b"%PDF-"):
+        return JSONResponse(status_code=400, content={"error": "Upload a valid PDF file"})
 
     try:
         text, hyperlinks = await asyncio.gather(
@@ -98,7 +160,7 @@ async def parse_resume(file: UploadFile = File(...)):
         )
     except Exception as e:
         print(f"[pdf extract] failed: {e}")
-        return JSONResponse(status_code=500, content={"error": "Could not read PDF"})
+        return JSONResponse(status_code=422, content={"error": "Could not read PDF"})
 
     if not text.strip():
         return JSONResponse(status_code=422, content={"error": "PDF has no extractable text (scanned image PDF?)"})
@@ -115,65 +177,47 @@ async def parse_resume(file: UploadFile = File(...)):
         if not merged.get(key) and hyperlinks.get(key):
             merged[key] = hyperlinks[key]
 
-    # Calculate YOE from experience dates, merging continuous same-company tenures.
-    # Prefer the date-derived value over the model's estimate — models routinely round it down.
+    # Calculate unique months across all jobs so simultaneous roles are not counted twice.
     computed_yoe = _calculate_yoe(merged.get("experience", []))
     if computed_yoe:
-        merged["yearsExperience"] = computed_yoe
+        # A stated total can include earlier jobs not present in the parsed history.
+        stated_yoe = _clean_years(regex_result.get("yearsExperience"))
+        merged["yearsExperience"] = max(computed_yoe, stated_yoe)
 
-    # Clear state if it doesn't look like a real US state code in context
-    if merged.get("state") and not merged.get("city"):
-        merged["state"] = ""
-
-    # If city is known but state is missing, ask AI to derive it
-    if not merged.get("state") and merged.get("city"):
-        merged["state"] = await _derive_state(merged["city"], merged.get("country", ""))
-
+    if not any(merged.get(key) for key in (
+        "name", "email", "phone", "linkedIn", "github", "currentTitle",
+        "currentCompany", "experience", "education", "skills",
+    )):
+        return JSONResponse(status_code=422, content={"error": "Could not extract profile details from PDF"})
 
     return {"profile": merged, "resumeText": text[:6000]}
 
 
 
-async def _derive_state(city: str, country: str) -> str:
-    try:
-        prompt = (
-            f'What is the state or province that "{city}" is in'
-            + (f' ({country})' if country else '') + '? '
-            'Reply with ONLY the state/province name, nothing else. '
-            'Use 2-letter abbreviation for US states (e.g. CA). '
-            'For other countries use the full state/province name (e.g. Maharashtra).'
-        )
-        result = await generate(prompt)
-        return result.strip().strip('."\'')
-    except Exception:
-        return ""
-
-
-def _calculate_yoe(experience: list) -> int:
-    """Calculate years of experience, merging continuous same-company tenure."""
-    company_ranges: dict[str, list] = {}
+def _calculate_yoe(experience: list) -> float:
+    """Count unique months worked, including simultaneous roles only once."""
+    ranges = []
+    now = datetime.now()
+    current_month = now.year * 12 + now.month
     for exp in experience:
-        company = (exp.get("company") or "").strip().lower()
         start_s = exp.get("startDate") or ""
         end_s   = exp.get("endDate")   or ""
         try:
             s = datetime.strptime(start_s, "%Y-%m")
-            e = datetime.strptime(end_s,   "%Y-%m") if end_s else datetime.now()
-        except ValueError:
+            e = datetime.strptime(end_s, "%Y-%m") if end_s else now
+        except (TypeError, ValueError):
             continue
-        company_ranges.setdefault(company, []).append((s, e))
+        start_month = s.year * 12 + s.month
+        end_month = min(e.year * 12 + e.month, current_month)
+        if start_month <= end_month:
+            ranges.append((start_month, end_month))
 
-    total_months = 0
-    for ranges in company_ranges.values():
-        ranges.sort(key=lambda x: x[0])
-        merged: list[list] = []
-        for s, e in ranges:
-            if merged and (s - merged[-1][1]).days <= 62:   # ≤2-month gap = continuous
-                merged[-1][1] = max(merged[-1][1], e)
-            else:
-                merged.append([s, e])
-        for s, e in merged:
-            # +1 to count both start and end month (Jan–Dec = 12, not 11)
-            total_months += (e.year - s.year) * 12 + (e.month - s.month) + 1
-
+    ranges.sort()
+    merged_ranges = []
+    for start, end in ranges:
+        if merged_ranges and start <= merged_ranges[-1][1] + 1:
+            merged_ranges[-1][1] = max(merged_ranges[-1][1], end)
+        else:
+            merged_ranges.append([start, end])
+    total_months = sum(end - start + 1 for start, end in merged_ranges)
     return round(total_months / 12, 1) if total_months > 0 else 0
