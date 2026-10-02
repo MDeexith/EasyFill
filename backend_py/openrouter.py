@@ -13,38 +13,11 @@ FREE_MODELS = [
 ][:3]
 
 
-# FastRouter — paid fallback when all OpenRouter free models are rate-limited
-FASTROUTER_BASE_URL = os.environ.get("FASTROUTER_BASE_URL", "https://api.fastrouter.ai/api/v1")
-FASTROUTER_MODEL = os.environ.get("FASTROUTER_MODEL", "openai/gpt-5.4-nano")
-
-
 def _client() -> AsyncOpenAI:
     return AsyncOpenAI(
         api_key=os.environ["OPENROUTER_API_KEY"],
         base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
     )
-
-
-def _fastrouter_client():
-    key = os.environ.get("FASTROUTER_API_KEY")
-    if not key:
-        return None
-    return AsyncOpenAI(api_key=key, base_url=FASTROUTER_BASE_URL)
-
-
-async def _call_fastrouter(messages: list) -> str:
-    client = _fastrouter_client()
-    if client is None:
-        raise RuntimeError("FASTROUTER_API_KEY not set")
-    response = await asyncio.wait_for(
-        client.chat.completions.create(
-            model=FASTROUTER_MODEL,
-            messages=messages,
-            temperature=0,
-        ),
-        timeout=30.0,
-    )
-    return response.choices[0].message.content.strip()
 
 
 async def _call(messages: list) -> str:
@@ -55,8 +28,8 @@ async def _call(messages: list) -> str:
             messages=messages,
             temperature=0,
         ),
-        # Free-tier models routinely take 50-60s on long prompts; 80s still leaves room
-        # for the FastRouter fallback within the app's 120s client timeout.
+        # Free-tier models routinely take 50-60s on long prompts; cap the call
+        # at 80s to stay within the app's client timeout.
         timeout=80.0,
     )
     chosen = getattr(response, "model", FREE_MODELS[0])
@@ -64,31 +37,12 @@ async def _call(messages: list) -> str:
     return response.choices[0].message.content.strip()
 
 
-def _should_fallback(e) -> bool:
-    """Quota/rate-limit, model-gone (free models get delisted without notice) and timeout errors."""
-    if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
-        return True
-    status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
-    if status in (402, 404, 429):
-        return True
-    msg = str(e).lower()
-    return any(s in msg for s in (
-        "rate limit", "rate-limit", "quota", "402", "429", "insufficient", "payment required",
-        "404", "not found", "no endpoints", "no allowed providers",
-    ))
-
-
-async def generate(prompt: str, *, allow_fastrouter_fallback: bool = False) -> str:
+async def generate(prompt: str) -> str:
     messages = [{"role": "user", "content": prompt}]
     try:
         return await _call(messages)
     except Exception as e:
         print(f"[openrouter] all free models failed: {e!r}")
-        if allow_fastrouter_fallback and _should_fallback(e) and _fastrouter_client() is not None:
-            print(f"[openrouter] switching to FastRouter ({FASTROUTER_MODEL})")
-            result = await _call_fastrouter(messages)
-            print(f"[openrouter] answered by FastRouter: {FASTROUTER_MODEL}")
-            return result
         raise
 
 

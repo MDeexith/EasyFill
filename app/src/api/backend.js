@@ -2,10 +2,8 @@ import axios from 'axios';
 
 let BASE_URL = 'https://easyfill.onrender.com';
 
-// Every LLM-backed route shares one budget. The backend allows an 80s
-// OpenRouter call plus a ~30s paid-tier fallback, so a shorter client timeout
-// just aborts work the server would have finished: /match on a 10-field form
-// measures 13-20s on free models, which the old 12s ceiling cut off every time.
+// Every LLM-backed route shares one budget. Allow the backend's 80s
+// OpenRouter call to finish, with extra time for request/response overhead.
 const LLM_TIMEOUT = 90000;
 
 export function setBackendUrl(url) {
