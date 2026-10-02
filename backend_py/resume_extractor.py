@@ -43,9 +43,9 @@ _MONTH_MAP = {
     'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
     'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12',
 }
-_DATE_TOKEN = r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(?:20|19)\d{2}'
+_DATE_TOKEN = r'(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(?:19|20)\d{2}|(?:19|20)\d{2}(?:[-/]\d{1,2}){0,2})'
 _DATE_RANGE_RE = re.compile(
-    rf'({_DATE_TOKEN})\s*[–\-—to]+\s*({_DATE_TOKEN}|Present|Current|Now)',
+    rf'({_DATE_TOKEN})\s*(?:[-–—]|to)\s*({_DATE_TOKEN}|Present|Current|Now)\b',
     re.I
 )
 _SECTION_SPLIT_RE = re.compile(
@@ -55,11 +55,15 @@ _SECTION_SPLIT_RE = re.compile(
 )
 
 
-def _fmt_date(token: str) -> str:
-    """Convert 'Jan 2026' → '2026-01', 'Present' → ''."""
+def _fmt_date(token: str, *, is_end: bool = False) -> str:
+    """Normalize text, ISO-month and year-only dates to YYYY-MM."""
     token = token.strip()
     if re.match(r'(?:Present|Current|Now)$', token, re.I):
         return ''
+    numeric = re.fullmatch(r'((?:19|20)\d{2})(?:[-/](\d{1,2})(?:[-/]\d{1,2})?)?', token)
+    if numeric:
+        month = int(numeric.group(2)) if numeric.group(2) else (12 if is_end else 1)
+        return f"{numeric.group(1)}-{month:02d}" if 1 <= month <= 12 else ''
     m = re.match(r'([A-Za-z]+)\.?\s+(\d{4})', token)
     if m:
         month = _MONTH_MAP.get(m.group(1)[:3].lower(), '01')
@@ -74,7 +78,8 @@ def _split_sections(text: str) -> dict:
         name = m.group(1).lower()
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        sections[name] = text[start:end].strip()
+        section = text[start:end].strip()
+        sections[name] = "\n".join(filter(None, (sections.get(name), section)))
     return sections
 
 
@@ -91,7 +96,7 @@ def _parse_experience_section(section: str) -> list:
         date_line = lines[date_line_idx]
         dr_m = _DATE_RANGE_RE.search(date_line)
         start_date = _fmt_date(dr_m.group(1)) if dr_m else ''
-        end_date   = _fmt_date(dr_m.group(2)) if dr_m else ''
+        end_date   = _fmt_date(dr_m.group(2), is_end=True) if dr_m else ''
 
         # Title = part of the date line before the date range, or the line above
         title = _DATE_RANGE_RE.sub('', date_line).strip().rstrip('|–- ').strip()
@@ -156,17 +161,19 @@ def _parse_education_section(section: str) -> list:
         has_degree = DEGREE_RE.search(line) or DEGREE_RE.search(next_line)
 
         if has_degree:
-            # Likely institution on current line if it doesn't have the degree, else same line
             if DEGREE_RE.search(line):
-                institution = ''
                 degree_line = line
-                year_source = line
-                if i > 0 and not lines[i - 1].startswith('•'):
+                institution = ''
+                if i > 0 and re.search(r'\b(university|college|institute|school|academy)\b', lines[i - 1], re.I):
                     institution = lines[i - 1]
+                elif next_line and not DEGREE_RE.search(next_line) and re.search(
+                    r'\b(university|college|institute|school|academy)\b', next_line, re.I
+                ):
+                    institution = next_line
+                    i += 1  # consume the institution line
             else:
                 institution = line
                 degree_line = next_line
-                year_source = next_line
                 i += 1  # consume the degree line
 
             # Extract degree and field
@@ -176,12 +183,15 @@ def _parse_education_section(section: str) -> list:
                 r'B\.?[SE](?![-\w])|M\.?[SE](?![-\w]))',
                 degree_line, re.I
             )
-            degree = re.split(r'\s*[–\-,\|]|\s+in\s', deg_m.group(0))[0].strip() if deg_m else ''
+            degree = re.split(r'\s*[–\-,\|]|\s+in\s', deg_m.group(0), maxsplit=1, flags=re.I)[0].strip() if deg_m else ''
 
             field_m = re.search(r'\bin\s+([A-Za-z][A-Za-z\s&]{3,50}?)(?:\s*[–\-,]|\s*CGPA|$)', degree_line, re.I)
             field = field_m.group(1).strip() if field_m else ''
+            if not field and deg_m:
+                remainder = degree_line[deg_m.end():].strip(' .,:|-–—')
+                field = re.split(r'\s+[-–—|]\s+|\b(?:19|20)\d{2}\b', remainder, maxsplit=1)[0].strip(' .,:|-–—')
 
-            yr_m = GRAD_YEAR_RE.search(year_source)
+            yr_m = GRAD_YEAR_RE.search(degree_line)
             year = yr_m.group(2) if yr_m else ''
 
             entries.append({
@@ -200,13 +210,24 @@ def _parse_education_section(section: str) -> list:
 
 def extract_profile_from_text(text: str) -> dict:
     lines = [l.strip() for l in text.split("\n") if l.strip()]
+    sections = _split_sections(text)
+    experience = _parse_experience_section(sections.get("experience", ""))
+    education = _parse_education_section(sections.get("education", ""))
 
     def first(pattern, flags=0):
         m = re.search(pattern, text, flags)
         return m.group(0).strip() if m else ""
 
     email    = first(r'[\w.+\-]+@[\w\-]+\.[\w.]{2,}')
-    phone    = first(r'(?:\+?\d[\d\s\-().]{6,14}\d)')
+    date_spans = [m.span() for m in re.finditer(r'\b(?:19|20)\d{2}[-/]\d{1,2}(?:[-/]\d{1,2})?\b', text)]
+    phone = ""
+    for candidate in re.finditer(r'\+?\d[\d\s\-().]{6,18}\d', text):
+        if any(start < candidate.end() and candidate.start() < end for start, end in date_spans):
+            continue
+        value = candidate.group(0).strip()
+        if 8 <= len(re.sub(r'\D', '', value)) <= 15:
+            phone = value
+            break
     linkedin = first(r'(?:https?://)?(?:www\.)?linkedin\.com/in/[\w\-_%]+/?', re.I)
     github   = first(r'(?:https?://)?(?:www\.)?github\.com/[\w\-]+/?', re.I)
 
@@ -288,16 +309,16 @@ def extract_profile_from_text(text: str) -> dict:
         re.I
     )
 
+    date_pattern = re.compile(rf'\b{_DATE_TOKEN}', re.I)
     title_m    = re.search(r'(?:title|position|role|currently)[:\s]+([A-Z][^\n,|]{3,60})', text, re.I)
     curr_title = title_m.group(1).strip() if title_m else ""
     if not curr_title:
         # Try to find the first job title pattern: lines with Date ranges nearby
         # Look for a line that precedes a date line (Jan 20XX – …)
-        date_pattern = re.compile(r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+20\d{2}', re.I)
         for i, line in enumerate(lines):
             if date_pattern.search(line):
                 # The title is often on the same line before the date, or the line above
-                title_candidate = re.sub(r'\s*' + date_pattern.pattern + r'.*', '', line, flags=re.I).strip()
+                title_candidate = re.sub(r'\s*' + date_pattern.pattern + r'.*', '', line, flags=re.I).strip(' -–—|')
                 if title_candidate and 3 < len(title_candidate) < 80 and not SECTION_HEADERS.match(title_candidate):
                     curr_title = title_candidate
                     break
@@ -306,19 +327,6 @@ def extract_profile_from_text(text: str) -> dict:
                     if prev and 3 < len(prev) < 80 and not SECTION_HEADERS.match(prev):
                         curr_title = prev
                         break
-    if not curr_title:
-        # Last resort: second non-trivial line that isn't a section header
-        skipped = 0
-        for line in lines[:15]:
-            if re.search(r'[@/\\|]|http|www\.|^\d', line, re.I):
-                continue
-            if SECTION_HEADERS.match(line):
-                continue
-            skipped += 1
-            if skipped == 2 and len(line) < 80:
-                curr_title = line
-                break
-
     company_m = re.search(
         r'(?:company|employer|organization|at\s)[:\s]+([A-Z][^\n,|]{2,50})', text, re.I
     )
@@ -340,6 +348,11 @@ def extract_profile_from_text(text: str) -> dict:
                 if re.match(r'^[A-Z]', co_line) and len(co_line) <= 60:
                     curr_co = co_line
                     break
+
+    if experience:
+        latest = max(experience, key=lambda entry: (not entry["endDate"], entry["startDate"]))
+        curr_title = latest["title"] or curr_title
+        curr_co = latest["company"] or curr_co
 
     NOT_CITY = re.compile(
         r'\b(Technology|Engineering|Computer|Science|Institute|University|College|'
@@ -380,15 +393,15 @@ def extract_profile_from_text(text: str) -> dict:
     zip_m    = re.search(r'\b\d{5}(?:-\d{4})?\b', text)
     zip_code = zip_m.group(0) if zip_m else ""
 
-    country_m = re.search(
-        r'\b(United States|USA|US|India|Canada|UK|United Kingdom|Australia|Germany|France|Singapore)\b',
-        text, re.I
-    )
+    # Restrict country detection to a location line. A phrase like "US Citizen"
+    # elsewhere in the resume describes work authorization, not an address.
+    country_m = re.search(rf',\s*({KNOWN_COUNTRIES})\b', text, re.I)
+    if not country_m:
+        country_m = next(
+            (m for line in lines[:12] if (m := re.fullmatch(KNOWN_COUNTRIES, line, re.I))),
+            None,
+        )
     country = country_m.group(1) if country_m else ""
-
-    sections = _split_sections(text)
-    experience = _parse_experience_section(sections.get("experience", sections.get("work experience", "")))
-    education  = _parse_education_section(sections.get("education", ""))
 
     return {
         "name": full_name, "firstName": first_name, "lastName": last_name,

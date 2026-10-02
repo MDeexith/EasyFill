@@ -54,7 +54,8 @@ Rules:
 - year in education: 4-digit graduation year as a string (e.g. "2022")
 - skills in experience: comma-separated list of technologies/tools used in that specific role (e.g. "Go, Kafka, Redis")
 - description in experience: bullet points joined with newline (\n), each starting with the bullet text (no "•")
-- state: the state or province. For US addresses use the 2-letter code (e.g. "CA"). For other countries derive it from the city if well-known (e.g. Mumbai → "Maharashtra", Bangalore → "Karnataka", London → "England"). Leave empty only if truly unknown
+- state: the state or province only when explicitly present in the resume. For US addresses use the 2-letter code (e.g. "CA"). Do not guess it from the city.
+- Extract only facts supported by the resume text. Do not guess employers, education, dates, or contact details.
 - portfolio: only a personal website or portfolio URL (http/https). Do NOT put LinkedIn, GitHub, or email addresses here. Leave empty if not found
 
 Resume text:
