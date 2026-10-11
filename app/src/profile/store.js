@@ -157,7 +157,16 @@ function profileHashStr(profile) {
 }
 
 function fieldFingerprint(f) {
-  return [f.name || '', f.label || '', f.type || '', f.autocomplete || ''].join('|');
+  return [f.name || '', f.label || f.ariaLabel || '', f.type || '', f.autocomplete || ''].join('|');
+}
+
+// A fingerprint with no name/label/ariaLabel is just "||type|" — every bare
+// button or unlabeled input on the page collides into it, and one cached
+// entry then sprays a profile key across unrelated fields (Workday: menu
+// buttons cached as "languages", the device-type dropdown stealing "phone").
+// Such fields are never cached and never resolved from cache.
+function fingerprintHasIdentity(f) {
+  return !!(f.name || f.label || f.ariaLabel);
 }
 
 function loadMappingCacheRaw() {
@@ -174,6 +183,7 @@ export function getCachedMapping(hostname, fields, profile) {
   if (entry.profileHash !== profileHashStr(profile)) return null;
   const result = {};
   for (const f of fields) {
+    if (!fingerprintHasIdentity(f)) continue;
     const fp = fieldFingerprint(f);
     if (entry.mapping[fp]) result[f.id] = entry.mapping[fp];
   }
@@ -183,7 +193,10 @@ export function getCachedMapping(hostname, fields, profile) {
 export function saveMappingCacheEntry(hostname, mapping, fields, profile) {
   const cache = loadMappingCacheRaw();
   const fpById = {};
-  for (const f of fields) fpById[f.id] = fieldFingerprint(f);
+  for (const f of fields) {
+    if (!fingerprintHasIdentity(f)) continue;
+    fpById[f.id] = fieldFingerprint(f);
+  }
   const fpMapping = {};
   for (const [fieldId, profileKey] of Object.entries(mapping)) {
     if (!profileKey) continue;

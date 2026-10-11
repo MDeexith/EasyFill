@@ -20,7 +20,20 @@ import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
 import { FORM_SCANNER_JS } from '../webview/formScanner';
 
-import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript, buildComboboxHarvestScript, mergeFillOutcomes } from '../webview/filler';
+import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript, buildComboboxHarvestScript, buildResumeAttachScript, mergeFillOutcomes } from '../webview/filler';
+
+// file:// path -> base64 payload for in-page File construction. RN's fetch
+// handles file:// and content:// URIs natively; FileReader gives a data: URL.
+async function readFileBase64(path) {
+  const uri = /^(file|content):\/\//.test(path) ? path : 'file://' + path;
+  const blob = await (await fetch(uri)).blob();
+  return await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.onerror = reject;
+    r.readAsDataURL(blob);
+  });
+}
 import { createHarvestCoordinator } from '../webview/harvestCoordinator';
 import { matchFieldsToProfile } from '../matcher';
 import {
@@ -564,12 +577,47 @@ export default function BrowserScreen({ route, navigation }) {
       const correctionFills = {};
       for (const f of scanned) {
         if (coveredMapping[f.id] && hasUsableProfileValue(profile, coveredMapping[f.id])) continue;
+        // Never replay corrections into hidden fields: custom dropdowns keep a
+        // display:none <select> twin whose fingerprint matches the visible
+        // widget's, and a correction recorded against either would land
+        // invisibly (and can poison the real widget's state).
+        if (f.visible === false) continue;
         const fp = [f.name||'', f.label||'', f.type||'', f.autocomplete||''].join('|');
         if (fp.split('|').filter(Boolean).length < 2) continue;
         if (corrections[fp] !== undefined) correctionFills[f.id] = corrections[fp];
       }
       if (Object.keys(correctionFills).length > 0) {
         webViewRef.current?.injectJavaScript(buildDirectFillScript(correctionFills));
+      }
+
+      // ── Resume attach ───────────────────────────────────────────────────
+      // The PDF kept at onboarding (keepLocalCopy) goes into file inputs that
+      // ask for a resume — or into the page's single file input when none is
+      // labelled. Multiple unlabelled file inputs are left alone: guessing
+      // could drop the resume into "transcript" or "cover letter".
+      const resumeAttachedIds = [];
+      try {
+        if (profile.resumeFilePath) {
+          const fileFields = scanned.filter(f => f.widget === 'file' || f.type === 'file');
+          const labelled = fileFields.filter(f =>
+            /resume|\bcv\b|curriculum/i.test(
+              [f.label, f.name, f.ariaLabel, f.placeholder, f.nearbyText].join(' ')
+            )
+          );
+          const targets = labelled.length > 0 ? labelled
+            : fileFields.length === 1 ? fileFields : [];
+          if (targets.length > 0) {
+            const b64 = await readFileBase64(profile.resumeFilePath);
+            if (b64) {
+              resumeAttachedIds.push(...targets.map(f => f.id));
+              webViewRef.current?.injectJavaScript(
+                buildResumeAttachScript(resumeAttachedIds, b64, profile.resumeFileName)
+              );
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[autofill] resume attach failed:', err?.message || err);
       }
 
       // Every id this run actually wrote to, not just the fast pass's. The old
@@ -582,7 +630,7 @@ export default function BrowserScreen({ route, navigation }) {
         fastMapping,
         aiMapping: safeAiMapping,
         profile,
-        dropdownIds: dropdownFilledIds,
+        dropdownIds: [...dropdownFilledIds, ...resumeAttachedIds],
         correctionIds: Object.keys(correctionFills),
       });
       webViewRef.current?.injectJavaScript(
@@ -752,11 +800,24 @@ export default function BrowserScreen({ route, navigation }) {
         if (newFields.length > 0) {
           const existing = new Set(fieldsRef.current.map(f => f.id));
           const added = newFields.filter(f => !existing.has(f.id));
-          setFields(prev => added.length > 0 ? [...prev, ...added] : prev);
+          // Merge by id, incoming wins: SPAs (Workday) hydrate name/label/
+          // autocomplete attributes AFTER the first scan, and the scanner
+          // re-describes every field on each update. Keeping only the first
+          // snapshot left the matcher working off attribute-less descriptors.
+          setFields(prev => {
+            const byId = new Map(prev.map(f => [f.id, f]));
+            for (const f of newFields) byId.set(f.id, f);
+            return [...byId.values()];
+          });
           if (
             multiStepActiveRef.current &&
-            !filledUrlsRef.current.has(urlRef.current) &&
-            added.length > 0
+            added.length > 0 &&
+            // SPA ATSes (Workday applyManually, Ashby) advance steps WITHOUT
+            // changing the URL, so the per-URL guard alone would block every
+            // step after the first. A burst of 3+ new fields is a step
+            // transition; 1-2 stragglers are widget noise (menus mounting,
+            // conditional fields) and keep the old behavior.
+            (!filledUrlsRef.current.has(urlRef.current) || added.length >= 3)
           ) {
             filledUrlsRef.current.add(urlRef.current);
             setStepCount(s => s + 1);
@@ -789,6 +850,11 @@ export default function BrowserScreen({ route, navigation }) {
         // Safety net: if FILL_COMPLETE fires while still in 'filling', advance to 'filling-ai'
         // (doAutofill controls the real filled transition after both passes complete)
         setTimeout(() => setPhase(prev => prev === 'filling' ? 'filling-ai' : prev), 200);
+      }
+
+      if (data.type === 'RESUME_ATTACHED') {
+        setFilledCount(prev => prev + (data.attached ?? 0));
+        setFillOutcomes(prev => mergeFillOutcomes(prev, data.outcomes));
       }
 
       if (data.type === 'AI_FILL_COMPLETE') {

@@ -148,6 +148,9 @@ const TIER = {
   autocomplete: 1.0,
   type: 0.95,
   nameId: 0.85,
+  // Element ids rank below name attrs: widget wrappers inherit their section's
+  // id ("phoneDeviceType" buttons) and would tie the real input on singletons.
+  domId: 0.80,
   label: 0.70,
   placeholder: 0.60,
   nearby: 0.50,
@@ -155,6 +158,16 @@ const TIER = {
 
 function normalise(s) {
   return (s || '').toString().toLowerCase().trim();
+}
+
+// name/id attributes are code identifiers ("phoneNumber", "zip_code"),
+// not prose — \b-anchored rules never match the camelCase form. Split
+// camelCase and separators into words before regexing.
+function decamel(s) {
+  return (s || '')
+    .toString()
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_\-.]+/g, ' ');
 }
 
 function isNegated(field, key) {
@@ -207,7 +220,8 @@ export function scoreField(field) {
 
   // Tier 3-6: regex on each text source independently
   const sources = [
-    ['nameId',      [field.name, field.domId].filter(Boolean).join(' ')],
+    ['nameId',      decamel(field.name)],
+    ['domId',       decamel(field.domId)],
     ['label',       [field.label, field.ariaLabel].filter(Boolean).join(' ')],
     ['placeholder', field.placeholder || ''],
     ['nearby',      field.nearbyText || ''],

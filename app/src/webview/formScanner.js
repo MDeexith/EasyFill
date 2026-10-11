@@ -472,9 +472,18 @@ export const FORM_SCANNER_JS = `
     var name = (el.getAttribute && el.getAttribute('name')) || '';
     var nearbyText = getNearbyText(el);
 
+    // display:none (self or ancestor) yields zero client rects. Hidden fields
+    // stay indexed (observers replay them when revealed) but carry the flag so
+    // the matcher can prefer the visible widget — e.g. a custom combobox whose
+    // hidden native <select> mirrors it would otherwise win the mapping and
+    // the fill would land invisibly.
+    var visible = true;
+    try { visible = !!(el.getClientRects && el.getClientRects().length); } catch (e) {}
+
     var desc = {
       id: afId,
       domId: el.id || '',
+      visible: visible,
       name: name,
       tag: tag,
       type: inputType,

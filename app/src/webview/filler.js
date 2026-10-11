@@ -57,6 +57,21 @@ function afMarkFilled(el) {
   try { if (el) el.__afFilledAt = Date.now(); } catch (e) {}
 }
 
+// National-format phone: strip the profile country's dial code when the
+// stored value is "<code> + 10 digits" glued together (e.g. "917021125165").
+// Pages routinely render the dial code as a fixed prefix beside the input, so
+// filling the full string double-counts the code and fails validation.
+// ponytail: dial-code table covers main markets; extend when a market needs it.
+function normalisePhone(raw, country) {
+  var digits = String(raw).replace(/[^0-9]/g, '');
+  var codes = { india: '91', 'united states': '1', usa: '1', 'united kingdom': '44', uk: '44' };
+  var cc = codes[String(country || '').trim().toLowerCase()] || '';
+  if (cc && digits.indexOf(cc) === 0 && digits.length === cc.length + 10) {
+    return digits.slice(cc.length);
+  }
+  return raw;
+}
+
 function isContentEditable(el) {
   if (!el || el.nodeType !== 1) return false;
   var ce = el.getAttribute && el.getAttribute('contenteditable');
@@ -74,6 +89,18 @@ function nativeSetter(el) {
 function fireFocus(el) {
   try { el.focus({ preventScroll: true }); } catch (e) { try { el.focus(); } catch (_) {} }
   try { el.dispatchEvent(new Event('focus', { bubbles: true })); } catch (e) {}
+  // React 17+ maps onFocus to focusin, not focus.
+  try { el.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); } catch (e) {}
+}
+
+// Commit a filled value the way a real user leaving the field would. Workday
+// (and other ATSes) persist a field server-side only on focusout — React 17+
+// maps onBlur to focusout, so a synthetic 'blur' alone never reaches their
+// handler and the save-side validation still sees the field as empty.
+function fireBlur(el) {
+  try { el.blur(); } catch (e) {}
+  try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch (e) {}
+  try { el.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); } catch (e) {}
 }
 
 function setNativeInput(el, value) {
@@ -451,13 +478,9 @@ function tryComboboxFill(el, value) {
               return;
             }
           }
-          // No text match — keyboard-select first visible option as fallback.
-          try {
-            el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
-            setTimeout(function() {
-              el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-            }, 100);
-          } catch(e) {}
+          // No text match — leave the field alone. Blind-selecting the first
+          // option commits an arbitrary answer (e.g. "Afghanistan" for
+          // country) on a live application; empty is always safer than wrong.
         } catch (e) {
           if (attempt < MAX_ATTEMPTS) tryClick();
         }
@@ -532,7 +555,7 @@ function fillOne(el, value) {
 
   fireFocus(el);
   setNativeInput(el, strVal);
-  try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch (e) {}
+  fireBlur(el);
   mark();
   return true;
 }
@@ -568,6 +591,49 @@ export function buildDirectFillScript(valuesById) {
   if (window.ReactNativeWebView) {
     window.ReactNativeWebView.postMessage(JSON.stringify({
       type: 'AI_FILL_COMPLETE', filled: filled, outcomes: outcomes
+    }));
+  }
+})();
+  `;
+}
+
+// Attach a file (base64) to <input type="file"> fields via DataTransfer —
+// the one programmatic path Chrome allows into a file input. Hidden file
+// inputs are fair game: dropzone UIs keep the real input display:none and
+// listen for its change event.
+// ponytail: whole file inlined as one base64 string into injectJavaScript;
+// chunked postMessage transfer if multi-MB resumes ever fail.
+export function buildResumeAttachScript(fieldIds, base64, fileName, mime) {
+  return `
+(function() {
+  var ids = ${safeJson(fieldIds || [])};
+  var name = ${safeJson(fileName || 'resume.pdf')};
+  var mime = ${safeJson(mime || 'application/pdf')};
+  ${FILLER_RUNTIME}
+  var outcomes = {};
+  var attached = 0;
+  try {
+    var bin = atob(${safeJson(base64)});
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    var dt = new DataTransfer();
+    dt.items.add(new File([bytes], name, { type: mime }));
+    ids.forEach(function(id) {
+      var el = findEl(id);
+      if (!el || (el.type || '').toLowerCase() !== 'file') { outcomes[id] = 'control-failed'; return; }
+      try {
+        afMarkFilled(el);
+        el.files = dt.files;
+        el.dispatchEvent(new Event('input',  { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        attached++;
+        outcomes[id] = 'filled';
+      } catch (e) { outcomes[id] = 'control-failed'; }
+    });
+  } catch (e) {}
+  if (window.ReactNativeWebView) {
+    window.ReactNativeWebView.postMessage(JSON.stringify({
+      type: 'RESUME_ATTACHED', attached: attached, outcomes: outcomes
     }));
   }
 })();
@@ -821,6 +887,15 @@ export function buildFillScript(mapping, profileJson, fields, optionSelections =
       val = optionSelections[fieldId];
     }
     if (val === undefined || val === null || val === '') { outcomes[fieldId] = 'no-value'; return; }
+
+    // Non-scalar profile values (education/experience arrays of objects) have
+    // no sane string form — String() would type "[object Object]" into the field.
+    if (Array.isArray(val)) {
+      val = val.filter(function(v) { return v != null && typeof v !== 'object'; }).join(', ');
+    }
+    if (typeof val === 'object' || val === '') { outcomes[fieldId] = 'no-value'; return; }
+
+    if (profileKey === 'phone') val = normalisePhone(val, profile.country);
 
     // Radio / checkbox group: routed via options[], not a single el.
     var meta = groupMeta[fieldId];

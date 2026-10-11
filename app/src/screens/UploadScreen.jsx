@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Animated, BackHandler } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { pick, types, isErrorWithCode, errorCodes } from '@react-native-documents/picker';
+import { pick, types, keepLocalCopy, isErrorWithCode, errorCodes } from '@react-native-documents/picker';
 import { Btn, IconBtn, Card, Eyebrow, T } from '../components/ui';
 import AppDialog, { useDialog } from '../components/AppDialog';
 import Icon from '../components/Icon';
@@ -79,8 +79,26 @@ export default function UploadScreen({ navigation }) {
       setState('uploading');
       setState('parsing');
       const profile = await parseResume(result.uri, result.name ?? 'resume.pdf');
+      // Keep the PDF itself so the browser can attach it to "Upload Resume"
+      // fields later. Best-effort: parsing succeeded, so a failed copy only
+      // loses the attach feature, not onboarding.
+      let resumeExtra = {};
+      try {
+        const [copy] = await keepLocalCopy({
+          files: [{ uri: result.uri, fileName: result.name ?? 'resume.pdf' }],
+          destination: 'documentDirectory',
+        });
+        if (copy?.status === 'success') {
+          resumeExtra = {
+            resumeFilePath: copy.localUri,
+            resumeFileName: result.name ?? 'resume.pdf',
+          };
+        }
+      } catch (copyErr) {
+        console.warn('[upload] keepLocalCopy failed:', copyErr?.message || copyErr);
+      }
       const existing = loadProfile();
-      saveProfile({ ...existing, ...profile });
+      saveProfile({ ...existing, ...profile, ...resumeExtra });
       setState('done');
       setTimeout(() => navigation.replace('Confirm'), 600);
     } catch (err) {
