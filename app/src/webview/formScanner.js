@@ -254,7 +254,8 @@ export const FORM_SCANNER_JS = `
     return results;
   }
 
-  function preferredLabelFor(el) {
+  function preferredLabelFor(el, limit) {
+    limit = limit || 120;
     // 1. <label for="id">
     if (el.id) {
       try {
@@ -262,13 +263,13 @@ export const FORM_SCANNER_JS = `
         var root = (el.getRootNode && el.getRootNode()) || doc;
         var lbl = root.querySelector('label[for="' + CSS.escape(el.id) + '"]');
         if (!lbl && root !== doc) lbl = doc.querySelector('label[for="' + CSS.escape(el.id) + '"]');
-        if (lbl && lbl.innerText) return lbl.innerText.trim().slice(0, 120);
+        if (lbl && lbl.innerText) return lbl.innerText.trim().slice(0, limit);
       } catch (e) {}
     }
     // 2. wrapping <label>
     var p = el.parentElement;
     for (var i = 0; i < 3 && p; i++) {
-      if (p.tagName === 'LABEL' && p.innerText) return p.innerText.trim().slice(0, 120);
+      if (p.tagName === 'LABEL' && p.innerText) return p.innerText.trim().slice(0, limit);
       p = p.parentElement;
     }
     // 3. aria-labelledby
@@ -280,7 +281,7 @@ export const FORM_SCANNER_JS = `
         var firstId = llby.split(/\\s+/)[0];
         var target = (root2.getElementById ? root2.getElementById(firstId) : null)
                   || doc2.getElementById(firstId);
-        if (target && target.innerText) return target.innerText.trim().slice(0, 120);
+        if (target && target.innerText) return target.innerText.trim().slice(0, limit);
       } catch (e) {}
     }
     return '';
@@ -355,14 +356,15 @@ export const FORM_SCANNER_JS = `
   // Group label for a radio/checkbox sibling-set (e.g. fieldset/legend, the
   // <div role="radiogroup" aria-labelledby="...">, or the heading text that
   // immediately precedes the group). Falls back to nearby text.
-  function getGroupLabelFor(el) {
+  function getGroupLabelFor(el, limit) {
+    limit = limit || 200;
     var p = el.parentElement;
     for (var i = 0; i < 6 && p; i++) {
       if (p.tagName === 'FIELDSET') {
         try {
           var lg = p.querySelector(':scope > legend');
           if (lg && lg.innerText && lg.innerText.trim()) {
-            return lg.innerText.trim().slice(0, 200);
+            return lg.innerText.trim().slice(0, limit);
           }
         } catch (e) {}
       }
@@ -373,11 +375,11 @@ export const FORM_SCANNER_JS = `
           try {
             var doc = el.ownerDocument || document;
             var ref = doc.getElementById(llby.split(/\\s+/)[0]);
-            if (ref && ref.innerText) return ref.innerText.trim().slice(0, 200);
+            if (ref && ref.innerText) return ref.innerText.trim().slice(0, limit);
           } catch (e) {}
         }
         var al = p.getAttribute && p.getAttribute('aria-label');
-        if (al) return al.trim().slice(0, 200);
+        if (al) return al.trim().slice(0, limit);
       }
       p = p.parentElement;
     }
@@ -474,7 +476,8 @@ export const FORM_SCANNER_JS = `
     var contentEditable = isContentEditable(el);
     var widget = classifyWidget(el, tag, contentEditable);
 
-    var label = preferredLabelFor(el);
+    var question = preferredLabelFor(el, 4000);
+    var label = question.slice(0, 120);
     var ariaLabel = (el.getAttribute && el.getAttribute('aria-label')) || '';
     if (!label && /^(button-dropdown|combobox-input|select)$/.test(widget) && el.closest) {
       var fieldset = el.closest('fieldset');
@@ -482,7 +485,10 @@ export const FORM_SCANNER_JS = `
       if (fieldset && Array.from(fieldset.querySelectorAll(INPUT_SELECTOR)).filter(function(control) {
         return control.getClientRects().length > 0 && !(control.closest &&
           control.closest('[role="listbox"], [role="menu"], [data-automation-id="responsiveMonikerPrompt"]'));
-      }).length === 1) label = getGroupLabelFor(el);
+      }).length === 1) {
+        question = getGroupLabelFor(el, 4000);
+        label = question.slice(0, 200);
+      }
     }
     if (widget === 'file' && !label && !ariaLabel && el.closest) {
       var uploadGroup = el.closest('[role="group"][aria-labelledby]');
@@ -498,6 +504,16 @@ export const FORM_SCANNER_JS = `
     // the fill would land invisibly.
     var visible = true;
     try { visible = !!(el.getClientRects && el.getClientRects().length); } catch (e) {}
+
+    var value = String(el.value || (widget === 'button-dropdown' || contentEditable ? el.textContent || '' : '')).trim();
+    var hasValue = !!value;
+    if (/^(select|button-dropdown|combobox-input)$/.test(widget)) {
+      var display = widget === 'select' && el.options && el.options[el.selectedIndex]
+        ? el.options[el.selectedIndex].text : value;
+      hasValue = !!value && !/^(select( one| an? option)?|please select|choose( one| an? option)?)[.\\s…*]*$/i.test(String(display || '').trim());
+      var selectedContainer = el.closest && el.closest('[data-automation-id="multiselectInputContainer"], [class*="-control"]');
+      if (selectedContainer && selectedContainer.querySelector('[data-automation-id="selectedItem"], [class*="-singleValue"], [class*="-multiValue"]')) hasValue = true;
+    }
 
     var desc = {
       id: afId,
@@ -520,6 +536,8 @@ export const FORM_SCANNER_JS = `
       ariaHasPopup: (el.getAttribute && el.getAttribute('aria-haspopup')) || '',
       ariaControls: (el.getAttribute && el.getAttribute('aria-controls')) || '',
       label: label,
+      question: question || ariaLabel,
+      hasValue: hasValue,
       placeholder: (el.getAttribute && el.getAttribute('placeholder')) || '',
       ariaLabel: ariaLabel,
       nearbyText: nearbyText,

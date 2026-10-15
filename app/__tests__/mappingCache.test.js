@@ -8,7 +8,7 @@ jest.mock('react-native-mmkv', () => {
 });
 
 import { createMMKV } from 'react-native-mmkv';
-import { getCachedMapping, saveMappingCacheEntry, listMappingCache, saveProfile, loadProfile } from '../src/profile/store';
+import { getCachedMapping, saveMappingCacheEntry, listMappingCache, saveProfile, loadProfile, mergeFieldCorrections, listFieldCorrections, deleteFieldCorrection, loadFieldCorrections } from '../src/profile/store';
 
 test('old generated mappings cannot override corrected matching rules', () => {
   const fields = [{ id: 'q', name: 'question', label: 'Authorized to work in this country?', type: 'button' }];
@@ -24,4 +24,15 @@ test('old generated mappings cannot override corrected matching rules', () => {
   expect(getCachedMapping('example.com', fields, profile)).toBeNull();
   expect(listMappingCache()).toEqual([]);
   expect(loadProfile().authorizedToWork).toBe('Yes');
+});
+
+test('lists and deletes site answers while preserving legacy answers', () => {
+  const key = JSON.stringify(['site-answer-v1', 'workday.example/en-US', 'Related to an employee?']);
+  mergeFieldCorrections({ [key]: 'No', 'name|Old answer|text|': 'Old value' });
+  expect(listFieldCorrections()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ fingerprint: key, host: 'workday.example/en-US', label: 'Related to an employee?', value: 'No' }),
+    expect.objectContaining({ label: 'Old answer', value: 'Old value' }),
+  ]));
+  deleteFieldCorrection(key);
+  expect(loadFieldCorrections()).toEqual({ 'name|Old answer|text|': 'Old value' });
 });

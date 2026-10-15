@@ -379,8 +379,37 @@ function openDropdown(el) {
   }
 }
 
+function trackWorkdayQuestionLoads(el) {
+  if (!/Questionnaire--/.test(el.id || '') || typeof window.fetch !== 'function') return null;
+  if (!window.__AF_QUESTION_LOADS__) {
+    var state = window.__AF_QUESTION_LOADS__ = { pending: 0, settledAt: 0, failures: 0 };
+    var fetch = window.fetch;
+    window.fetch = function(input) {
+      var url = typeof input === 'string' ? input : input && input.url || '';
+      var tracked = /\\/questionnaire\\/[^/]+\\/definition(?:[?#]|$)/.test(url);
+      if (tracked) state.pending++;
+      function settled(failed) {
+        if (tracked) { state.pending--; state.settledAt = Date.now(); if (failed) state.failures++; }
+      }
+      try {
+        return fetch.apply(this, arguments).then(function(response) {
+          if (tracked && response.ok !== false) {
+            try {
+              response.clone().arrayBuffer().then(function() { settled(false); }, function() { settled(true); });
+            } catch (error) { settled(true); }
+          } else { settled(response.ok === false); }
+          return response;
+        }, function(error) { settled(true); throw error; });
+      } catch (error) { settled(true); throw error; }
+    };
+  }
+  return window.__AF_QUESTION_LOADS__;
+}
+
 function selectDropdownOption(el, value) {
   return new Promise(function(resolve) {
+    var questionLoads = trackWorkdayQuestionLoads(el);
+    var failuresBefore = questionLoads ? questionLoads.failures : 0;
     var attempts = 0;
     function poll() {
       if (!afIsCurrent() || el.isConnected === false || el.__afUserEdited) { resolve(false); return; }
@@ -422,7 +451,28 @@ function selectDropdownOption(el, value) {
           action.click();
         }
         fireBlur(el);
-        resolve(true);
+        if (!isButtonDropdown(el)) { resolve(true); return; }
+        // React may commit the selection after the click handler returns.
+        var selectedText = cleanOptText(best.innerText || best.textContent || '');
+        var selectedValue = cleanOptText(best.getAttribute('data-value') || best.getAttribute('value') || '');
+        var checks = 0;
+        var clickedAt = Date.now();
+        function confirmSelection() {
+          if (!afIsCurrent() || el.isConnected === false || el.__afUserEdited) { resolve(false); return; }
+          // Workday refreshes conditional rules and can reset later answers until it settles.
+          if (questionLoads && (questionLoads.pending || Date.now() - Math.max(clickedAt, questionLoads.settledAt) < 200)) {
+            if (++checks < 50) { setTimeout(confirmSelection, 100); return; }
+            resolve(false); return;
+          }
+          if (questionLoads && questionLoads.failures !== failuresBefore) { resolve(false); return; }
+          var display = cleanOptText(el.innerText || el.textContent || '');
+          var valueNow = cleanOptText(el.value || '');
+          if ((selectedText && (display === selectedText || valueNow === selectedText)) ||
+            (selectedValue && valueNow === selectedValue)) { resolve(true); return; }
+          if (++checks < 15) { setTimeout(confirmSelection, 100); return; }
+          resolve(false);
+        }
+        confirmSelection();
       } catch (e) { resolve(false); }
     }
     // Let input handlers finish updating the menu before choosing an option.
@@ -569,6 +619,8 @@ function fillChips(el, values) {
 function forEachField(ids, fill, done) {
   var index = 0;
   function next() {
+    // A timed-out questionnaire request must not race the rest of this batch.
+    if (window.__AF_QUESTION_LOADS__ && window.__AF_QUESTION_LOADS__.pending) { done(); return; }
     while (afIsCurrent() && index < ids.length) {
       var result = fill(ids[index++]);
       if (result && typeof result.then === 'function') {
@@ -643,11 +695,17 @@ export function mergeFillOutcomes(prev, incoming) {
   return { ...(prev || {}), ...(incoming || {}) };
 }
 
-export function buildDirectFillScript(valuesById, generation = null) {
+export function buildDirectFillScript(valuesById, generation = null, explicitAnswers = false) {
   return `
 (function() {
   var values = ${safeJson(valuesById)};
   ${FILLER_RUNTIME}
+
+  ${explicitAnswers ? `// Only a fresh user-confirmed answer may supersede earlier manual edits.
+  Object.keys(values).forEach(function(id) {
+    var el = findEl(id);
+    if (el) el.__afUserEdited = false;
+  });` : ''}
 
   var filled = 0;
   var outcomes = {};

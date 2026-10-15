@@ -46,6 +46,8 @@ import { resolveLocally, resolveWithAi, DROPDOWN_WIDGET_NAMES } from '../matcher
 import { generateText } from '../api/backend';
 import { loadProfile, addHistoryEntry, loadFieldCorrections, mergeFieldCorrections } from '../profile/store';
 import { enrichProfile } from '../profile/enrich';
+import ApplicationAnswersSheet from '../components/ApplicationAnswersSheet';
+import { answerKey, isAcknowledgment, remainingQuestions, savedAnswers, answersToRemember } from '../profile/applicationAnswers';
 
 function getHostname(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
@@ -295,11 +297,15 @@ export default function BrowserScreen({ route, navigation }) {
       webViewRef.current?.injectJavaScript(
         `window.__AF_FILL_EPOCH__ = ${epoch};` + build(generation)
       );
-    }, 5000 + count * 4000);
+    }, 5000 + count * 8000);
     if (epoch !== autofillEpochRef.current) return {};
-    if (!result.outcomes) throw new Error('The page did not confirm autofill completion');
+    if (!result.outcomes) {
+      cancelAutofill();
+      setPhase(previous => ['filling', 'filling-ai', 'drafting'].includes(previous) ? 'detected' : previous);
+      throw new Error('The page did not confirm autofill completion. Please try again.');
+    }
     return result.outcomes;
-  }, []);
+  }, [cancelAutofill]);
 
   // Single entry point for scanner injection. Skips the scanner entirely on
   // Cloudflare interstitials — crawling / mutating the challenge page trips
@@ -471,6 +477,14 @@ export default function BrowserScreen({ route, navigation }) {
       const fillCount = mapping => Object.values(mapping).reduce((count, key) => count +
         (key === 'skills' || key === 'languages' ? String(profile[key] || '').split(',').length : 1), 0);
 
+      // Explicit answers take precedence over profile guesses and cached mappings.
+      const remembered = savedAnswers(scanned, urlRef.current, loadFieldCorrections());
+      const rememberedOutcomes = Object.keys(remembered).length
+        ? await fillPage(gen => buildDirectFillScript(remembered, gen), Object.keys(remembered).length, epoch) : {};
+      if (!current()) return;
+      const rememberedIds = Object.keys(rememberedOutcomes).filter(id => rememberedOutcomes[id] === 'filled');
+      scanned = scanned.filter(f => !(f.id in remembered) && !f.hasValue && !isAcknowledgment(f));
+
       // ── PASS 1: cache + regex (no AI) ───────────────────────────────────
       const { mapping: fastMapping, decisions: fastDecisions } =
         await matchFieldsToProfile(scanned, profile, false, host);
@@ -637,7 +651,7 @@ export default function BrowserScreen({ route, navigation }) {
         // display:none <select> twin whose fingerprint matches the visible
         // widget's, and a correction recorded against either would land
         // invisibly (and can poison the real widget's state).
-        if (f.visible === false) continue;
+        if (f.visible === false || f.hasValue || isAcknowledgment(f)) continue;
         const fp = [f.name||'', f.label||'', f.type||'', f.autocomplete||''].join('|');
         if (fp.split('|').filter(Boolean).length < 2) continue;
         if (corrections[fp] !== undefined) correctionFills[f.id] = corrections[fp];
@@ -679,7 +693,7 @@ export default function BrowserScreen({ route, navigation }) {
         aiMapping: safeAiMapping,
         profile,
         dropdownIds: [...dropdownFilledIds, ...resumeAttachedIds],
-        correctionIds: Object.keys(correctionFills),
+        correctionIds: [...Object.keys(correctionFills), ...rememberedIds],
       });
       webViewRef.current?.injectJavaScript(
         buildCorrectionListenerScript(filledAfIds)
@@ -711,6 +725,67 @@ export default function BrowserScreen({ route, navigation }) {
   }, [doAiDraft, fillPage]);
 
   useEffect(() => { doAutofillRef.current = doAutofill; }, [doAutofill]);
+
+  async function prepareApplicationAnswers() {
+    if (autofillInFlightRef.current) throw new Error('Wait for autofill to finish, then try again.');
+    cancelAutofill();
+    autofillInFlightRef.current = true;
+    try {
+      const epoch = autofillEpochRef.current;
+      const pageUrl = urlRef.current;
+      const unanswered = remainingQuestions(fieldsRef.current, fillOutcomes);
+      const ids = unanswered.filter(f => DROPDOWN_WIDGET_NAMES.includes(f.widget) && !f.options?.length).map(f => f.id);
+      const options = ids.length ? await harvestCoordinatorRef.current.startHarvest(
+        gen => webViewRef.current?.injectJavaScript(buildComboboxHarvestScript(ids, gen)),
+        2000 + ids.length * 1200,
+      ) : {};
+      if (epoch !== autofillEpochRef.current) throw new Error('The page changed. Close and reopen the questions.');
+      return { epoch, url: pageUrl, fields: unanswered.map(f => ({ ...f, options: (options[f.id] || f.options || [])
+        .filter(option => option.value && option.label && !/^(select one|please select|select|choose one)$/i.test(option.label.trim())) })) };
+    } finally {
+      autofillInFlightRef.current = false;
+      const queued = pendingAutofillRef.current;
+      pendingAutofillRef.current = null;
+      if (queued) {
+        const ids = new Set(queued.map(field => field.id));
+        doAutofillRef.current?.(fieldsRef.current.filter(field => ids.has(field.id)));
+      }
+    }
+  }
+
+  async function fillApplicationAnswers(session, answers) {
+    if (autofillInFlightRef.current) throw new Error('Wait for autofill to finish, then try again.');
+    if (session.epoch !== autofillEpochRef.current || session.url !== urlRef.current) {
+      throw new Error('The page changed. Close and reopen the questions.');
+    }
+    const currentFields = new Map(fieldsRef.current.map(field => [field.id, field]));
+    if (session.fields.some(field => !currentFields.has(field.id) || fieldIdentity(field) !== fieldIdentity(currentFields.get(field.id)))) {
+      throw new Error('The questions changed. Close and reopen the questions.');
+    }
+    autofillInFlightRef.current = true;
+    try {
+      const selections = {};
+      for (const field of session.fields) {
+        const value = answers[field.id];
+        if (typeof value !== 'string' || !value.trim()) continue;
+        if (DROPDOWN_WIDGET_NAMES.includes(field.widget) && !field.options.some(option => option.value === value)) continue;
+        selections[field.id] = value.trim();
+      }
+      const outcomes = await fillPage(gen => buildDirectFillScript(selections, gen, true), Object.keys(selections).length, session.epoch);
+      if (session.epoch !== autofillEpochRef.current) throw new Error('The page changed. Check your answers on the page.');
+      mergeFieldCorrections(answersToRemember(session.fields, selections, outcomes, session.url));
+      webViewRef.current?.injectJavaScript(buildCorrectionListenerScript(Object.keys(selections).filter(id => outcomes[id] === 'filled')));
+      return session.fields.filter(f => outcomes[f.id] !== 'filled').map(f => f.id);
+    } finally {
+      autofillInFlightRef.current = false;
+      const queued = pendingAutofillRef.current;
+      pendingAutofillRef.current = null;
+      if (queued) {
+        const ids = new Set(queued.map(field => field.id));
+        doAutofillRef.current?.(fieldsRef.current.filter(field => ids.has(field.id)));
+      }
+    }
+  }
 
   const manualRescan = useCallback(() => {
     cancelAutofill();
@@ -933,9 +1008,9 @@ export default function BrowserScreen({ route, navigation }) {
         if (wasAutoFilled) return;
         setFields(currentFields => {
           const field = currentFields.find(f => f.id === afId);
-          if (!field) return currentFields;
-          const fp = [field.name||'', field.label||'', field.type||'', field.autocomplete||''].join('|');
-          if (fp.split('|').filter(Boolean).length < 2) return currentFields;
+          if (!field || isAcknowledgment(field) || field.type === 'password') return currentFields;
+          const fp = answerKey(field, urlRef.current);
+          if (!fp) return currentFields;
           setPendingCorrections(prev => ({ ...prev, [fp]: value }));
           return currentFields;
         });
@@ -1193,6 +1268,9 @@ export default function BrowserScreen({ route, navigation }) {
                       Autofill {fieldCount} field{fieldCount === 1 ? '' : 's'}
                     </Text>
                   </TouchableOpacity>
+
+                  <ApplicationAnswersSheet count={remainingQuestions(fields, fillOutcomes).length}
+                    prepare={prepareApplicationAnswers} fill={fillApplicationAnswers} />
 
                   <View style={styles.panelFoot}>
                     <Icon name="zap" size={11} color={theme.colors.muted} />

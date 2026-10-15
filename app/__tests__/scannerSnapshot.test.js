@@ -150,3 +150,35 @@ test('detects a cross-origin Workday application iframe', () => {
     type: 'ATS_IFRAME_DETECTED', src: dom.state.iframes[0].src,
   });
 });
+
+test('keeps full declaration text and distinguishes placeholders from selected answers', () => {
+  const dom = fixture();
+  const dropdown = dom.element({ 'aria-haspopup': 'listbox' }, 'BUTTON');
+  dropdown.textContent = 'Select One';
+  const question = 'Please review: ' + 'long declaration '.repeat(30);
+  const fieldset = {
+    tagName: 'FIELDSET', childNodes: [], getAttribute: () => null,
+    querySelector: () => ({ innerText: question }),
+    querySelectorAll: selector => selector === 'label' ? [] : [dropdown],
+  };
+  dropdown.parentElement = fieldset;
+  dropdown.closest = selector => selector === 'fieldset' ? fieldset : null;
+  dom.state.elements = [dropdown];
+  dom.install();
+  expect(dom.messages.filter(msg => msg.fields).at(-1).fields[0]).toMatchObject({
+    label: question.trim().slice(0, 200), question: question.trim(), hasValue: false,
+  });
+  dropdown.textContent = 'No';
+  dom.update();
+  expect(dom.messages.filter(msg => msg.fields).at(-1).fields[0].hasValue).toBe(true);
+});
+
+test.each(['multiselectInputContainer', '-control'])('recognizes a selected combobox with an empty search input (%s)', container => {
+  const dom = fixture();
+  const dropdown = dom.element({ role: 'combobox', 'aria-label': 'Skills' });
+  dropdown.value = '';
+  dropdown.closest = selector => selector.includes(container) ? { querySelector: () => ({ textContent: 'JavaScript' }) } : null;
+  dom.state.elements = [dropdown];
+  dom.install();
+  expect(dom.messages.filter(msg => msg.fields).at(-1).fields[0].hasValue).toBe(true);
+});

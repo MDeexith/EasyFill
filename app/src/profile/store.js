@@ -285,6 +285,10 @@ export function clearFieldCorrections() {
 export function listFieldCorrections() {
   const corrections = loadFieldCorrections();
   return Object.entries(corrections).map(([fp, value]) => {
+    try {
+      const [version, host, label] = JSON.parse(fp);
+      if (version === 'site-answer-v1') return { fingerprint: fp, host, label, value };
+    } catch {}
     const [name = '', label = '', type = '', autocomplete = ''] = fp.split('|');
     return { fingerprint: fp, name, label, type, autocomplete, value };
   });

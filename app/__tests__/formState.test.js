@@ -25,6 +25,13 @@ test('field identity changes when a reused control asks a different question', (
     .not.toBe(fieldIdentity(field('a', { label: 'State' })));
 });
 
+test('full questions invalidate a session even if truncated labels match', () => {
+  const prefix = 'A long declaration '.repeat(20);
+  const before = field('q', { label: prefix.slice(0, 200), question: prefix + 'employee?' });
+  const after = { ...before, question: prefix + 'customer?' };
+  expect(selectChangedFields([before], [after])).toEqual([after]);
+});
+
 test('Workday selection text in aria-label does not cancel the current fill', () => {
   const country = field('country', {
     widget: 'button-dropdown', label: 'Country / Territory*',

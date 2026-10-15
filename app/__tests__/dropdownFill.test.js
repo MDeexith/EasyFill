@@ -1,7 +1,7 @@
 import { buildFillScript, buildDirectFillScript, buildComboboxHarvestScript } from '../src/webview/filler';
 
 // Execute the injected code, including timers; these menus close each other.
-function fixture({ labels = ['India', 'Canada'], shadow = false, input = false, nested = false, semantic = true, noControls = false } = {}) {
+function fixture({ labels = ['India', 'Canada'], shadow = false, input = false, nested = false, semantic = true, noControls = false, commitDelay = 0, ignoreClick = false, questionRefresh = false, bodyDelay = 0 } = {}) {
   const messages = [];
   const opened = [];
   const selected = {};
@@ -16,6 +16,7 @@ function fixture({ labels = ['India', 'Canada'], shadow = false, input = false, 
     const attrs = { role: 'combobox', 'aria-controls': id + '-menu' };
     if (noControls) { delete attrs['aria-controls']; attrs.name = 'location'; }
     const el = {
+      id: questionRefresh ? 'primaryQuestionnaire--' + id : id,
       tagName: input ? 'INPUT' : 'BUTTON', value: '', isConnected: true,
       getAttribute: key => attrs[key] || null,
       getRootNode: () => root,
@@ -37,7 +38,21 @@ function fixture({ labels = ['India', 'Canada'], shadow = false, input = false, 
         textContent: label,
         getAttribute: () => null,
         dispatchEvent() {}, scrollIntoView() {},
-        click() { selected[id] = label; el.value = label; active = null; },
+        click() {
+          if (ignoreClick) return;
+          const commit = () => { selected[id] = label; el.value = label; active = null; };
+          if (commitDelay) setTimeout(commit, commitDelay); else commit();
+          if (questionRefresh) {
+            const snapshot = { ...selected };
+            window.fetch('/questionnaire/example/definition').then(response => response.arrayBuffer()).then(() => {
+              Object.keys(elements).forEach(key => {
+                delete selected[key];
+                elements[key].value = snapshot[key] || '';
+              });
+              Object.assign(selected, snapshot);
+            });
+          }
+        },
         };
         return nested && selector.includes('li') ? [{ ...option }, option] : [option];
       }),
@@ -53,6 +68,10 @@ function fixture({ labels = ['India', 'Canada'], shadow = false, input = false, 
   };
   Object.values(elements).forEach(el => { el.ownerDocument = document; });
   const window = {
+    fetch: () => new Promise(resolve => setTimeout(() => {
+      const body = new Promise(done => setTimeout(done, bodyDelay));
+      resolve({ ok: true, arrayBuffer: () => body, clone: () => ({ arrayBuffer: () => body }) });
+    }, 650)),
     HTMLInputElement: { prototype: {} }, HTMLTextAreaElement: { prototype: {} },
     ReactNativeWebView: { postMessage: raw => messages.push(JSON.parse(raw)) },
   };
@@ -86,6 +105,51 @@ test('a missing option reports failure instead of a successful fill', async () =
   await jest.runAllTimersAsync();
   expect(dom.selected).toEqual({});
   expect(dom.messages[0].outcomes).toEqual({ af_1: 'control-failed' });
+});
+
+test('waits for a dropdown selection to commit before opening the next field', async () => {
+  const dom = fixture({ commitDelay: 250 });
+  dom.run(buildDirectFillScript({ af_1: 'India', af_2: 'Canada' }));
+  await jest.advanceTimersByTimeAsync(100);
+  expect(dom.opened).toEqual(['af_1']);
+  expect(dom.messages).toEqual([]);
+  await jest.runAllTimersAsync();
+  expect(dom.selected).toEqual({ af_1: 'India', af_2: 'Canada' });
+});
+
+test('a dropdown that ignores the click is not reported filled', async () => {
+  const dom = fixture({ ignoreClick: true });
+  dom.run(buildDirectFillScript({ af_1: 'India' }));
+  await jest.runAllTimersAsync();
+  expect(dom.messages[0].outcomes.af_1).toBe('control-failed');
+});
+
+test.each([0, 1300, 4050])('Workday questionnaire body refresh cannot reset subsequent answers (body delay %s)', async bodyDelay => {
+  const dom = fixture({ questionRefresh: true, bodyDelay });
+  dom.run(buildDirectFillScript({ af_1: 'India', af_2: 'Canada' }));
+  await jest.advanceTimersByTimeAsync(500);
+  expect(dom.opened).toEqual(['af_1']);
+  await jest.runAllTimersAsync();
+  expect(dom.selected).toEqual({ af_1: 'India', af_2: 'Canada' });
+  expect(dom.messages[0].outcomes).toEqual({ af_1: 'filled', af_2: 'filled' });
+});
+
+test('a Workday refresh timeout stops the batch before touching subsequent answers', async () => {
+  const dom = fixture({ questionRefresh: true, bodyDelay: 8000 });
+  dom.run(buildDirectFillScript({ af_1: 'India', af_2: 'Canada' }));
+  await jest.runAllTimersAsync();
+  expect(dom.opened).toEqual(['af_1']);
+  expect(dom.messages[0].outcomes).toEqual({ af_1: 'control-failed' });
+});
+
+test('explicit answers can replace prior edits but still respect new edits during filling', async () => {
+  const dom = fixture();
+  dom.elements.af_1.__afUserEdited = true;
+  dom.elements.af_2.__afUserEdited = true;
+  dom.run(buildDirectFillScript({ af_1: 'India', af_2: 'Canada' }, null, true));
+  dom.elements.af_2.__afUserEdited = true;
+  await jest.runAllTimersAsync();
+  expect(dom.selected).toEqual({ af_1: 'India' });
 });
 
 test('selection finds the associated popup inside a shadow root', async () => {
