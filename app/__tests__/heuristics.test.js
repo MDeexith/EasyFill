@@ -76,6 +76,32 @@ describe('applyHeuristics', () => {
 // Before this fix both were swallowed by `workAuthorization` — a profile key
 // nothing populates — which also excluded them from the AI pass.
 describe('application-question keys (the branch\'s headline capability)', () => {
+  test('Workday authorization asks for eligibility, not the country name', () => {
+    const { mapping } = applyHeuristics([
+      field({ id: 'q', label: 'Are you authorized to work in the country where this job is located?' }),
+    ]);
+    expect(mapping.q).toBe('authorizedToWork');
+  });
+
+  test('a country question may mention the current employer', () => {
+    const { mapping } = applyHeuristics([field({ id: 'q', label: 'Country of current employer' })]);
+    expect(mapping.q).toBe('country');
+  });
+
+  test.each([
+    ['Relocation city', 'city'],
+    ['Country of work permit', 'country'],
+  ])('preserves address matching for %s', (label, expected) => {
+    expect(applyHeuristics([field({ id: 'q', label })]).mapping.q).toBe(expected);
+  });
+
+  test('an employer restriction question does not ask for the employer name', () => {
+    const { mapping } = applyHeuristics([
+      field({ id: 'q', label: 'Are you subject to any non-compete or non-solicitation restrictions at your current or most recent employer?' }),
+    ]);
+    expect(mapping.q).toBeNull();
+  });
+
   test('Greenhouse\'s "legally authorized to work" question maps to authorizedToWork', () => {
     const { mapping } = applyHeuristics([
       field({ id: 'q1', label: 'Are you legally authorized to work in the United States?' }),

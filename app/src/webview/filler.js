@@ -11,6 +11,8 @@ function safeJson(value) {
 // buildDirectFillScript. Defined once (string) and concatenated into the
 // payload to keep the two scripts in sync.
 const FILLER_RUNTIME = `
+var afEpoch = window.__AF_FILL_EPOCH__;
+function afIsCurrent() { return afEpoch === window.__AF_FILL_EPOCH__; }
 function findEl(id) {
   function search(root) {
     if (!root || !root.querySelector) return null;
@@ -57,6 +59,35 @@ function afMarkFilled(el) {
   try { if (el) el.__afFilledAt = Date.now(); } catch (e) {}
 }
 
+// National-format phone: strip the profile country's dial code when the
+// stored value is "<code> + 10 digits" glued together (e.g. "917021125165").
+// Pages routinely render the dial code as a fixed prefix beside the input, so
+// filling the full string double-counts the code and fails validation.
+// shortcut: dial-code table covers main markets; extend when a market needs it.
+function normalisePhone(raw, country, el) {
+  var digits = String(raw).replace(/[^0-9]/g, '');
+  // Workday separates the dial code without declaring tel-national.
+  var doc = el.ownerDocument || document;
+  var codeInput = /--phoneNumber$/.test(el.id || '') && doc.getElementById
+    ? doc.getElementById(el.id.replace(/--phoneNumber$/, '--countryPhoneCode')) : null;
+  var container = codeInput && codeInput.closest('[data-automation-id="multiselectInputContainer"]');
+  var selected = container && container.querySelector('[data-automation-id="selectedItem"]');
+  var selectedCode = selected && /\\(\\+([0-9]+)\\)/.exec(selected.textContent || '');
+  if (selectedCode) {
+    if (String(raw).trim().charAt(0) === '+') {
+      return digits.indexOf(selectedCode[1]) === 0 ? digits.slice(selectedCode[1].length) : raw;
+    }
+    if (el.getAttribute('autocomplete') !== 'tel-national' && el.maxLength !== 10) return digits;
+  }
+  if (el.getAttribute('autocomplete') !== 'tel-national' && el.maxLength !== 10) return raw;
+  var codes = { india: '91', 'united states': '1', usa: '1', 'united kingdom': '44', uk: '44' };
+  var cc = selectedCode ? selectedCode[1] : codes[String(country || '').trim().toLowerCase()] || '';
+  if (cc && digits.indexOf(cc) === 0 && digits.length === cc.length + 10) {
+    return digits.slice(cc.length);
+  }
+  return raw;
+}
+
 function isContentEditable(el) {
   if (!el || el.nodeType !== 1) return false;
   var ce = el.getAttribute && el.getAttribute('contenteditable');
@@ -74,6 +105,18 @@ function nativeSetter(el) {
 function fireFocus(el) {
   try { el.focus({ preventScroll: true }); } catch (e) { try { el.focus(); } catch (_) {} }
   try { el.dispatchEvent(new Event('focus', { bubbles: true })); } catch (e) {}
+  // React 17+ maps onFocus to focusin, not focus.
+  try { el.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); } catch (e) {}
+}
+
+// Commit a filled value the way a real user leaving the field would. Workday
+// (and other ATSes) persist a field server-side only on focusout — React 17+
+// maps onBlur to focusout, so a synthetic 'blur' alone never reaches their
+// handler and the save-side validation still sees the field as empty.
+function fireBlur(el) {
+  try { el.blur(); } catch (e) {}
+  try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch (e) {}
+  try { el.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); } catch (e) {}
 }
 
 function setNativeInput(el, value) {
@@ -175,31 +218,78 @@ function isButtonDropdown(el) {
   return false;
 }
 
-// Wait until the dropdown's popup listbox/menu actually appears in the DOM,
-// then return it. Returns null on timeout.
-function waitForListbox(el, maxAttempts, intervalMs) {
-  return new Promise(function(resolve) {
-    var attempts = 0;
-    function poll() {
-      attempts++;
-      var ariaControls = el.getAttribute && el.getAttribute('aria-controls');
-      var listbox = null;
-      if (ariaControls) {
-        try { listbox = document.getElementById(ariaControls); } catch (e) {}
-      }
-      if (!listbox) {
-        listbox =
-          document.querySelector('[role="listbox"]:not([aria-hidden="true"])') ||
-          document.querySelector('[role="menu"]:not([aria-hidden="true"])') ||
-          document.querySelector('[data-radix-popper-content-wrapper] [role="listbox"], [data-radix-popper-content-wrapper] [role="menu"]') ||
-          document.querySelector('.MuiMenu-list, .MuiList-root, .ant-select-dropdown:not(.ant-select-dropdown-hidden), [class*="menu-list"], [class*="dropdown-menu"]:not([hidden])');
-      }
-      if (listbox) { resolve(listbox); return; }
-      if (attempts >= maxAttempts) { resolve(null); return; }
-      setTimeout(poll, intervalMs);
+var LISTBOX_SELECTOR =
+  '[role="listbox"]:not([aria-hidden="true"]), ' +
+  '[role="menu"]:not([aria-hidden="true"]), .pac-container, ' +
+  '.MuiMenu-list, .ant-select-dropdown:not(.ant-select-dropdown-hidden), [class*="menu-list"], [class*="dropdown-menu"]:not([hidden])';
+
+// Search roots, nearest first: the element's own shadow root (Workday), then
+// its document (same-origin iframe), then the top document. Mirrors the
+// reach of FILLER_RUNTIME's findEl, which is what located the field.
+function scopesOf(el) {
+  var roots = [];
+  try {
+    var r = el.getRootNode ? el.getRootNode() : null;
+    if (r && r.querySelectorAll) roots.push(r);
+  } catch (e) {}
+  try {
+    if (el.ownerDocument && roots.indexOf(el.ownerDocument) === -1) roots.push(el.ownerDocument);
+  } catch (e) {}
+  if (roots.indexOf(document) === -1) roots.push(document);
+  return roots;
+}
+
+// aria-controls / aria-owns names THIS field's popup, so it is authoritative
+// — honoured even when it resolves to a node already read, because some
+// widgets legitimately reuse one portal container for every menu.
+function byAssociation(el, roots) {
+  var id = null;
+  try { id = el.getAttribute('aria-controls') || el.getAttribute('aria-owns'); } catch (e) {}
+  if (!id) return null;
+  for (var i = 0; i < roots.length; i++) {
+    var node = null;
+    try {
+      node = roots[i].getElementById ? roots[i].getElementById(id) : null;
+    } catch (e) {}
+    if (!node) continue;
+    try {
+      if (node.getAttribute && node.getAttribute('aria-hidden') === 'true') continue;
+    } catch (e) {}
+    if (node.getClientRects && !node.getClientRects().length) continue;
+    return node;
+  }
+  return null;
+}
+
+function findListbox(el, prevListbox) {
+  var prompt = workdayPrompt(el);
+  if (prompt) return prompt.querySelector('[role="listbox"]');
+  var roots = scopesOf(el);
+  var assoc = byAssociation(el, roots);
+  if (assoc) return assoc;
+  if (el.getAttribute('aria-controls') || el.getAttribute('aria-owns')) return null;
+  for (var i = 0; i < roots.length; i++) {
+    var nodes = [];
+    try { nodes = roots[i].querySelectorAll(LISTBOX_SELECTOR); } catch (e) { nodes = []; }
+    for (var j = 0; j < nodes.length; j++) {
+      // An unassociated menu identical to the one the last field used is
+      // assumed stale rather than guessed to belong here. A missed harvest
+      // just leaves the field to the AI resolver; a wrong one picks a wrong
+      // answer on a live application.
+      if (prevListbox && nodes[j] === prevListbox) continue;
+      if (nodes[j].getAttribute('data-automation-id') === 'selectedItemList') continue;
+      if (nodes[j].getClientRects && !nodes[j].getClientRects().length) continue;
+      return nodes[j];
     }
-    poll();
-  });
+  }
+  return null;
+}
+
+function dropdownOptions(listbox) {
+  var semantic = listbox.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"]');
+  if (semantic.length) return semantic;
+  var actions = listbox.querySelectorAll('.pac-item, button, a');
+  return actions.length ? actions : listbox.querySelectorAll('li');
 }
 
 function clickCheckable(el, shouldBeChecked) {
@@ -279,52 +369,124 @@ function fillCheckboxGroup(options, value) {
   return hits > 0;
 }
 
-function tryButtonDropdownFill(el, value) {
+function openDropdown(el) {
+  fireFocus(el);
+  try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true })); } catch (e) {}
+  try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true })); } catch (e) {}
+  try { el.click(); } catch (e) {}
+  if (el.getAttribute('aria-expanded') !== 'true') {
+    try { el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true })); } catch (e) {}
+  }
+}
+
+function trackWorkdayQuestionLoads(el) {
+  if (!/Questionnaire--/.test(el.id || '') || typeof window.fetch !== 'function') return null;
+  if (!window.__AF_QUESTION_LOADS__) {
+    var state = window.__AF_QUESTION_LOADS__ = { pending: 0, settledAt: 0, failures: 0 };
+    var fetch = window.fetch;
+    window.fetch = function(input) {
+      var url = typeof input === 'string' ? input : input && input.url || '';
+      var tracked = /\\/questionnaire\\/[^/]+\\/definition(?:[?#]|$)/.test(url);
+      if (tracked) state.pending++;
+      function settled(failed) {
+        if (tracked) { state.pending--; state.settledAt = Date.now(); if (failed) state.failures++; }
+      }
+      try {
+        return fetch.apply(this, arguments).then(function(response) {
+          if (tracked && response.ok !== false) {
+            try {
+              response.clone().arrayBuffer().then(function() { settled(false); }, function() { settled(true); });
+            } catch (error) { settled(true); }
+          } else { settled(response.ok === false); }
+          return response;
+        }, function(error) { settled(true); throw error; });
+      } catch (error) { settled(true); throw error; }
+    };
+  }
+  return window.__AF_QUESTION_LOADS__;
+}
+
+function selectDropdownOption(el, value) {
   return new Promise(function(resolve) {
-    try {
-      try { el.scrollIntoView({ block: 'center' }); } catch (e) {}
-      try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true })); } catch (e) {}
-      try { el.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true })); } catch (e) {}
-      try { el.click(); } catch (e) {}
-
-      waitForListbox(el, 12, 150).then(function(listbox) {
-        if (!listbox) { resolve(false); return; }
-
-        var options = listbox.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], li, button, a');
-        if (!options || options.length === 0) { resolve(false); return; }
-
+    var questionLoads = trackWorkdayQuestionLoads(el);
+    var failuresBefore = questionLoads ? questionLoads.failures : 0;
+    var attempts = 0;
+    function poll() {
+      if (!afIsCurrent() || el.isConnected === false || el.__afUserEdited) { resolve(false); return; }
+      attempts++;
+      var best = null, bestScore = 0, tied = false;
+      var listbox = findListbox(el);
+      if (listbox) {
+        var options = dropdownOptions(listbox);
         var target = cleanOptText(value);
-        var best = null, bestScore = 0;
         for (var i = 0; i < options.length; i++) {
-          var text = cleanOptText(options[i].innerText || options[i].textContent || '');
-          if (!text) continue;
-          var score = text === target ? 4
-                    : text.startsWith(target) ? 3
-                    : (target.length >= 2 && text.indexOf(target) !== -1) ? 2
-                    : 0;
-          if (score > bestScore) { bestScore = score; best = options[i]; }
+          var opt = options[i];
+          if (opt.disabled || opt.getAttribute('aria-disabled') === 'true') continue;
+          var text = cleanOptText(opt.innerText || opt.textContent || '');
+          var val = cleanOptText(opt.getAttribute('data-value') || opt.getAttribute('value') || '');
+          var score = target && (text === target || val === target) ? 4
+            : target.length >= 2 && text.indexOf(target) === 0 ? 3 : 0;
+          // Workday offers both a catalog skill and an identical free-text choice.
+          if (score === 4 && workdayPrompt(el) && /^menuItem-REMOTE_SKILL-/.test(opt.id || '')) score = 5;
+          if (score > bestScore) { best = opt; bestScore = score; tied = false; }
+          else if (score && score === bestScore && score !== 5 &&
+            !(workdayPrompt(el) && opt.id && opt.id === best.id)) tied = true;
         }
-
-        if (!best) { resolve(false); return; }
-
-        try { best.scrollIntoView({ block: 'center' }); } catch (e) {}
-        try { best.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true })); } catch (e) {}
-        try { best.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true })); } catch (e) {}
-        try { best.click(); } catch (e) {}
-        // Some menus close only on a follow-up Enter on the trigger.
-        try {
-          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-        } catch (e) {}
-        resolve(true);
-      });
-    } catch (e) {
-      resolve(false);
+      }
+      if (!best || tied) {
+        // Search results can briefly contain the previous query's options.
+        if (attempts < (workdayPrompt(el) ? 25 : 15)) { setTimeout(poll, 150); return; }
+        try { el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (e) {}
+        resolve(false);
+        return;
+      }
+      try {
+        afMarkFilled(el);
+        try { best.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+        var action = best.querySelector && best.querySelector('[data-automation-id="promptLeafNode"]') || best;
+        var checkbox = action.querySelector && action.querySelector('input[type="checkbox"]');
+        if (!checkbox || !checkbox.checked) {
+          action.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+          action.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+          action.click();
+        }
+        fireBlur(el);
+        if (!isButtonDropdown(el)) { resolve(true); return; }
+        // React may commit the selection after the click handler returns.
+        var selectedText = cleanOptText(best.innerText || best.textContent || '');
+        var selectedValue = cleanOptText(best.getAttribute('data-value') || best.getAttribute('value') || '');
+        var checks = 0;
+        var clickedAt = Date.now();
+        function confirmSelection() {
+          if (!afIsCurrent() || el.isConnected === false || el.__afUserEdited) { resolve(false); return; }
+          // Workday refreshes conditional rules and can reset later answers until it settles.
+          if (questionLoads && (questionLoads.pending || Date.now() - Math.max(clickedAt, questionLoads.settledAt) < 200)) {
+            if (++checks < 50) { setTimeout(confirmSelection, 100); return; }
+            resolve(false); return;
+          }
+          if (questionLoads && questionLoads.failures !== failuresBefore) { resolve(false); return; }
+          var display = cleanOptText(el.innerText || el.textContent || '');
+          var valueNow = cleanOptText(el.value || '');
+          if ((selectedText && (display === selectedText || valueNow === selectedText)) ||
+            (selectedValue && valueNow === selectedValue)) { resolve(true); return; }
+          if (++checks < 15) { setTimeout(confirmSelection, 100); return; }
+          resolve(false);
+        }
+        confirmSelection();
+      } catch (e) { resolve(false); }
     }
+    // Let input handlers finish updating the menu before choosing an option.
+    setTimeout(poll, 0);
   });
 }
 
+function tryButtonDropdownFill(el, value) {
+  openDropdown(el);
+  return selectDropdownOption(el, value);
+}
+
 function isPlacesLikeInput(el) {
-  if (!el || !el.getAttribute) return false;
+  if (!el || !el.getAttribute || el.readOnly) return false;
   if (el.getAttribute('role') !== 'combobox') return false;
   if (el.getAttribute('aria-controls')) return false;
   var name = (el.getAttribute('name') || '').toLowerCase();
@@ -332,47 +494,6 @@ function isPlacesLikeInput(el) {
   var al = (el.getAttribute('aria-label') || '').toLowerCase();
   var dl = (el.getAttribute('data-label') || '').toLowerCase();
   return /city|location|locat|where|based|address/.test(name + ' ' + ph + ' ' + al + ' ' + dl);
-}
-
-function pickBestOption(el, value, resolve) {
-  try {
-    var listbox = document.querySelector('[role="listbox"]') ||
-                  document.querySelector('.pac-container') ||
-                  document.querySelector('[class*="autocomplete"]');
-
-    function fallbackArrow() {
-      try {
-        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
-        setTimeout(function() {
-          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-          resolve(false);
-        }, 150);
-      } catch(e) { resolve(false); }
-    }
-
-    if (!listbox) { fallbackArrow(); return; }
-
-    var options = listbox.querySelectorAll('[role="option"], .pac-item, li');
-    if (!options || options.length === 0) { fallbackArrow(); return; }
-
-    var target = String(value).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-    var best = null, bestScore = 0;
-    for (var i = 0; i < options.length; i++) {
-      var text = (options[i].innerText || options[i].textContent || '')
-                  .toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-      var score = text === target ? 3 : text.startsWith(target) ? 2 : text.indexOf(target) !== -1 ? 1 : 0;
-      if (score > bestScore) { bestScore = score; best = options[i]; }
-    }
-
-    if (best) {
-      try { best.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); } catch(e) {}
-      try { best.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch(e) {}
-      best.click();
-      resolve(true);
-    } else {
-      fallbackArrow();
-    }
-  } catch(e) { resolve(false); }
 }
 
 function tryPlacesComboboxFill(el, value) {
@@ -390,8 +511,9 @@ function tryPlacesComboboxFill(el, value) {
     var i = 0;
 
     function typeNext() {
+      if (!afIsCurrent() || el.isConnected === false || el.__afUserEdited) { resolve(false); return; }
       if (i >= typeChunk.length) {
-        setTimeout(function() { pickBestOption(el, value, resolve); }, 700);
+        setTimeout(function() { selectDropdownOption(el, value).then(resolve); }, 700);
         return;
       }
       var partial = typeChunk.slice(0, i + 1);
@@ -411,63 +533,71 @@ function tryPlacesComboboxFill(el, value) {
 }
 
 function tryComboboxFill(el, value) {
-  // React-Select / Headless UI / ARIA combobox patterns
   var role = el.getAttribute && el.getAttribute('role');
   var hasPopup = el.getAttribute && el.getAttribute('aria-haspopup');
-  var controls = el.getAttribute && el.getAttribute('aria-controls');
-  if (role !== 'combobox' && hasPopup !== 'listbox' && !controls) return false;
+  if (role !== 'combobox' && hasPopup !== 'listbox' && hasPopup !== 'menu') return false;
+  if (el.readOnly) return tryButtonDropdownFill(el, value);
+  openDropdown(el);
+  var previousValue = el.value;
+  setNativeInput(el, value);
+  return selectDropdownOption(el, value).then(function(ok) {
+    if (!ok && afIsCurrent() && !el.__afUserEdited && el.isConnected !== false) setNativeInput(el, previousValue);
+    return ok;
+  });
+}
 
-  fireFocus(el);
+function isWorkdaySelect(el) {
+  return el.getAttribute('data-uxi-widget-type') === 'selectinput';
+}
 
-  // React Select opens its menu on focus; give it a tick before typing to filter.
-  setTimeout(function() {
-    setNativeInput(el, value);
+function workdayPrompt(el) {
+  var id = el.getAttribute('data-uxi-multiselect-id');
+  if (!id) return null;
+  var prompts = (el.ownerDocument || document).querySelectorAll('[data-associated-widget]');
+  for (var i = 0; i < prompts.length; i++) {
+    if (prompts[i].getAttribute('data-associated-widget') === id) return prompts[i];
+  }
+  return null;
+}
 
-    var MAX_ATTEMPTS = 3;
-    var attempt = 0;
-
-    function tryClick() {
-      attempt++;
-      setTimeout(function() {
-        try {
-          var listbox = controls ? document.getElementById(controls) :
-            document.querySelector('[role="listbox"]');
-          if (!listbox) {
-            if (attempt < MAX_ATTEMPTS) tryClick();
-            return;
-          }
-          var options = listbox.querySelectorAll('[role="option"]');
-          if (!options.length) {
-            if (attempt < MAX_ATTEMPTS) tryClick();
-            return;
-          }
-          var val = String(value).toLowerCase();
-          for (var i = 0; i < options.length; i++) {
-            var t = (options[i].innerText || options[i].textContent || '').trim().toLowerCase();
-            if (t === val || t.indexOf(val) !== -1) {
-              try { options[i].dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); } catch(e) {}
-              try { options[i].dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch(e) {}
-              options[i].click();
-              return;
-            }
-          }
-          // No text match — keyboard-select first visible option as fallback.
-          try {
-            el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
-            setTimeout(function() {
-              el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-            }, 100);
-          } catch(e) {}
-        } catch (e) {
-          if (attempt < MAX_ATTEMPTS) tryClick();
-        }
-      }, 350);
+async function fillWorkdaySelect(el, values) {
+  if (!afIsCurrent() || el.disabled || el.__afUserEdited || el.isConnected === false) return false;
+  openDropdown(el);
+  var prompt = null;
+  for (var attempt = 0; attempt < 15 && !prompt; attempt++) {
+    if (!afIsCurrent() || el.__afUserEdited || el.isConnected === false) return false;
+    prompt = workdayPrompt(el);
+    if (!prompt) await new Promise(function(resolve) { setTimeout(resolve, 100); });
+  }
+  if (!prompt) return false;
+  var input = prompt.querySelector('input[data-uxi-widget-type="selectinput"]') || el;
+  var ok = true;
+  for (var i = 0; i < values.length; i++) {
+    if (!afIsCurrent() || el.__afUserEdited || input.__afUserEdited || el.isConnected === false || input.isConnected === false) return false;
+    var container = el.closest && el.closest('[data-automation-id="multiselectInputContainer"]');
+    var selectedItems = container ? container.querySelectorAll('[data-automation-id="selectedItem"]') : [];
+    var alreadySelected = false;
+    for (var s = 0; s < selectedItems.length; s++) {
+      if (cleanOptText(selectedItems[s].textContent) === cleanOptText(values[i])) alreadySelected = true;
     }
-
-    tryClick();
-  }, 50);
-
-  return true;
+    if (alreadySelected) continue;
+    afMarkFilled(input);
+    setNativeInput(input, values[i]);
+    await new Promise(function(resolve) { setTimeout(resolve, 100); });
+    if (!afIsCurrent() || el.__afUserEdited || input.__afUserEdited) return false;
+    // Workday searches on Enter; typing alone leaves its previous result list.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    if (!await selectDropdownOption(el, values[i])) ok = false;
+    await new Promise(function(resolve) { setTimeout(resolve, 100); });
+  }
+  if (!afIsCurrent()) return false;
+  var buttons = prompt.querySelectorAll('button');
+  for (var b = 0; b < buttons.length; b++) {
+    if ((buttons[b].textContent || '').trim() === 'Done') { buttons[b].click(); break; }
+  }
+  fireBlur(el);
+  return ok;
 }
 
 function fillChips(el, values) {
@@ -486,10 +616,45 @@ function fillChips(el, values) {
   }
 }
 
+function forEachField(ids, fill, done) {
+  var index = 0;
+  function next() {
+    // A timed-out questionnaire request must not race the rest of this batch.
+    if (window.__AF_QUESTION_LOADS__ && window.__AF_QUESTION_LOADS__.pending) { done(); return; }
+    while (afIsCurrent() && index < ids.length) {
+      var result = fill(ids[index++]);
+      if (result && typeof result.then === 'function') {
+        result.then(next, next);
+        return;
+      }
+    }
+    done();
+  }
+  next();
+}
+
 function fillOne(el, value) {
-  if (!el) return false;
+  if (!el || !afIsCurrent() || el.isConnected === false || el.disabled || el.__afUserEdited) return false;
+  if (el.readOnly && el.getAttribute('role') !== 'combobox' && el.getAttribute('aria-haspopup') !== 'listbox') return false;
+  if (el.getClientRects && !el.getClientRects().length) return false;
   afMarkFilled(el);
   var strVal = String(value);
+
+  var nativeCheckbox = el.tagName === 'INPUT' && el.type === 'checkbox';
+  if (nativeCheckbox || el.getAttribute('role') === 'checkbox') {
+    if (el.getAttribute('aria-disabled') === 'true') return false;
+    var booleanValue = strVal.trim().toLowerCase();
+    if (!/^(yes|no|true|false|1|0)$/.test(booleanValue)) return false;
+    var checked = /^(yes|true|1)$/.test(booleanValue);
+    function checkedState() { return nativeCheckbox ? el.checked : el.getAttribute('aria-checked'); }
+    if (!nativeCheckbox) {
+      if (!/^(true|false)$/.test(checkedState())) return false;
+      checked = String(checked);
+    }
+    // Click once so the page's state handler receives the change.
+    try { if (checkedState() !== checked) el.click(); } catch (error) { return false; }
+    return checkedState() === checked;
+  }
 
   // No-op kept so existing call sites stay untouched; visual highlight removed.
   function mark() {}
@@ -510,29 +675,24 @@ function fillOne(el, value) {
   // Greenhouse Country, Workday "Yes/No", etc.). Click to open, find a
   // matching option in the popup, click it.
   if (isButtonDropdown(el)) {
-    tryButtonDropdownFill(el, strVal).then(function(ok) { if (ok) mark(); });
-    mark();
-    return true;
+    return tryButtonDropdownFill(el, strVal);
   }
 
   // Google Places / geocoding-backed location comboboxes need char-by-char
   // typing + a longer wait for the API response before clicking an option.
   if (isPlacesLikeInput(el)) {
-    tryPlacesComboboxFill(el, strVal).then(function(ok) { if (ok) mark(); });
-    mark();
-    return true;
+    return tryPlacesComboboxFill(el, strVal);
   }
 
   // Combobox / custom dropdown — try first, fall through to native fill if it
   // wasn't actually a combobox.
-  if (tryComboboxFill(el, strVal)) {
-    mark();
-    return true;
-  }
+  if (isWorkdaySelect(el)) return fillWorkdaySelect(el, [strVal]);
+  var combo = tryComboboxFill(el, strVal);
+  if (combo) return combo;
 
   fireFocus(el);
   setNativeInput(el, strVal);
-  try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch (e) {}
+  fireBlur(el);
   mark();
   return true;
 }
@@ -551,23 +711,83 @@ export function mergeFillOutcomes(prev, incoming) {
   return { ...(prev || {}), ...(incoming || {}) };
 }
 
-export function buildDirectFillScript(valuesById) {
+export function buildDirectFillScript(valuesById, generation = null, explicitAnswers = false) {
   return `
 (function() {
   var values = ${safeJson(valuesById)};
   ${FILLER_RUNTIME}
 
-  var filled = 0;
-  var outcomes = {};
+  ${explicitAnswers ? `// Only a fresh user-confirmed answer may supersede earlier manual edits.
   Object.keys(values).forEach(function(id) {
     var el = findEl(id);
+    if (el) el.__afUserEdited = false;
+  });` : ''}
+
+  var filled = 0;
+  var outcomes = {};
+  forEachField(Object.keys(values), function(id) {
+    var el = findEl(id);
     if (!el) { outcomes[id] = 'control-failed'; return; }
-    if (fillOne(el, values[id])) { filled++; outcomes[id] = 'filled'; }
-    else outcomes[id] = 'control-failed';
-  });
+    function record(ok) {
+      outcomes[id] = ok ? 'filled' : 'control-failed';
+      if (ok) filled++;
+    }
+    var result = fillOne(el, values[id]);
+    if (result && result.then) return result.then(record, function() { record(false); });
+    record(result);
+  }, function() {
   if (window.ReactNativeWebView) {
     window.ReactNativeWebView.postMessage(JSON.stringify({
-      type: 'AI_FILL_COMPLETE', filled: filled, outcomes: outcomes
+      type: 'AI_FILL_COMPLETE', epoch: afEpoch, filled: filled, outcomes: outcomes${generation == null ? '' : ', generation: ' + safeJson(generation)}
+    }));
+  }
+  });
+})();
+  `;
+}
+
+// Attach a file (base64) to <input type="file"> fields via DataTransfer —
+// the one programmatic path Chrome allows into a file input. Hidden file
+// inputs are fair game: dropzone UIs keep the real input display:none and
+// listen for its change event.
+// shortcut: whole file inlined as one base64 string into injectJavaScript;
+// chunked postMessage transfer if multi-MB resumes ever fail.
+export function buildResumeAttachScript(fieldIds, base64, fileName, mime) {
+  return `
+(function() {
+  var ids = ${safeJson(fieldIds || [])};
+  var name = ${safeJson(fileName || 'resume.pdf')};
+  var mime = ${safeJson(mime || 'application/pdf')};
+  ${FILLER_RUNTIME}
+  var outcomes = {};
+  var attached = 0;
+  try {
+    var bin = atob(${safeJson(base64)});
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    var dt = new DataTransfer();
+    dt.items.add(new File([bytes], name, { type: mime }));
+    ids.forEach(function(id) {
+      var el = findEl(id);
+      if (!el || (el.type || '').toLowerCase() !== 'file') { outcomes[id] = 'control-failed'; return; }
+      var upload = el.closest && el.closest('[data-automation-id="attachments-FileUpload"]');
+      if ((el.files && el.files.length) || (upload && upload.querySelector('[data-automation-id="file-upload-successful"]'))) {
+        outcomes[id] = 'filled';
+        return;
+      }
+      try {
+        afMarkFilled(el);
+        el.files = dt.files;
+        el.dispatchEvent(new Event('input',  { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        attached++;
+        outcomes[id] = 'filled';
+      } catch (e) { outcomes[id] = 'control-failed'; }
+    });
+  } catch (e) {}
+  if (window.ReactNativeWebView) {
+    window.ReactNativeWebView.postMessage(JSON.stringify({
+      type: 'RESUME_ATTACHED', epoch: afEpoch, attached: attached, outcomes: outcomes
     }));
   }
 })();
@@ -609,7 +829,7 @@ export function buildComboboxHarvestScript(fieldIds, generation = null) {
     window.__AF_HARVEST_UNTIL__ = 0;
     if (window.ReactNativeWebView) {
       window.ReactNativeWebView.postMessage(JSON.stringify({
-        type: 'COMBOBOX_OPTIONS', generation: generation, options: results
+        type: 'COMBOBOX_OPTIONS', epoch: afEpoch, generation: generation, options: results
       }));
     }
   }
@@ -620,72 +840,12 @@ export function buildComboboxHarvestScript(fieldIds, generation = null) {
   // to another and can select an arbitrary answer on a real application.
   var prevListbox = null;
 
-  var LISTBOX_SELECTOR =
-    '[role="listbox"]:not([aria-hidden="true"]), ' +
-    '[role="menu"]:not([aria-hidden="true"])';
-
-  // Search roots, nearest first: the element's own shadow root (Workday), then
-  // its document (same-origin iframe), then the top document. Mirrors the
-  // reach of FILLER_RUNTIME's findEl, which is what located the field.
-  function scopesOf(el) {
-    var roots = [];
-    try {
-      var r = el.getRootNode ? el.getRootNode() : null;
-      if (r && r.querySelectorAll) roots.push(r);
-    } catch (e) {}
-    try {
-      if (el.ownerDocument && roots.indexOf(el.ownerDocument) === -1) roots.push(el.ownerDocument);
-    } catch (e) {}
-    if (roots.indexOf(document) === -1) roots.push(document);
-    return roots;
-  }
-
-  // aria-controls / aria-owns names THIS field's popup, so it is authoritative
-  // — honoured even when it resolves to a node already read, because some
-  // widgets legitimately reuse one portal container for every menu.
-  function byAssociation(el, roots) {
-    var id = null;
-    try { id = el.getAttribute('aria-controls') || el.getAttribute('aria-owns'); } catch (e) {}
-    if (!id) return null;
-    for (var i = 0; i < roots.length; i++) {
-      var node = null;
-      try {
-        node = roots[i].getElementById ? roots[i].getElementById(id) : null;
-      } catch (e) {}
-      if (!node) continue;
-      try {
-        if (node.getAttribute && node.getAttribute('aria-hidden') === 'true') continue;
-      } catch (e) {}
-      return node;
-    }
-    return null;
-  }
-
-  function findListbox(el) {
-    var roots = scopesOf(el);
-    var assoc = byAssociation(el, roots);
-    if (assoc) return assoc;
-    for (var i = 0; i < roots.length; i++) {
-      var nodes = [];
-      try { nodes = roots[i].querySelectorAll(LISTBOX_SELECTOR); } catch (e) { nodes = []; }
-      for (var j = 0; j < nodes.length; j++) {
-        // An unassociated menu identical to the one the last field used is
-        // assumed stale rather than guessed to belong here. A missed harvest
-        // just leaves the field to the AI resolver; a wrong one picks a wrong
-        // answer on a live application.
-        if (prevListbox && nodes[j] === prevListbox) continue;
-        return nodes[j];
-      }
-    }
-    return null;
-  }
-
   function readOptionsFrom(listbox) {
     var out = [];
     if (!listbox || !listbox.querySelectorAll) return out;
     var nodes = [];
     try {
-      nodes = listbox.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], li');
+      nodes = dropdownOptions(listbox);
     } catch (e) { return out; }
     for (var i = 0; i < nodes.length; i++) {
       var label = (nodes[i].innerText || nodes[i].textContent || '').trim();
@@ -695,7 +855,7 @@ export function buildComboboxHarvestScript(fieldIds, generation = null) {
     return out;
   }
 
-  // Retry loop modelled on waitForListbox, replacing the single 300ms shot the
+  // Poll for options, replacing the single 300ms shot the
   // harvest used to take: React-Select routinely needs longer than that to
   // mount its menu, and a miss silently dropped the field.
   var MAX_ATTEMPTS = 8;
@@ -704,9 +864,10 @@ export function buildComboboxHarvestScript(fieldIds, generation = null) {
   function waitForOptions(el, done) {
     var attempts = 0;
     function poll() {
+      if (!afIsCurrent()) { done(null, []); return; }
       attempts++;
       var lb = null;
-      try { lb = findListbox(el); } catch (e) {}
+      try { lb = findListbox(el, prevListbox); } catch (e) {}
       if (lb) {
         var opts = readOptionsFrom(lb);
         if (opts.length) { done(lb, opts); return; }
@@ -718,6 +879,11 @@ export function buildComboboxHarvestScript(fieldIds, generation = null) {
   }
 
   function closeAny(el) {
+    var prompt = workdayPrompt(el);
+    var buttons = prompt ? prompt.querySelectorAll('button') : [];
+    for (var b = 0; b < buttons.length; b++) {
+      if ((buttons[b].textContent || '').trim() === 'Done') { buttons[b].click(); break; }
+    }
     try {
       el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
     } catch (e) {}
@@ -725,7 +891,7 @@ export function buildComboboxHarvestScript(fieldIds, generation = null) {
   }
 
   function step(i) {
-    if (i >= ids.length) { post(); return; }
+    if (!afIsCurrent() || i >= ids.length) { post(); return; }
     var afId = ids[i];
     // findEl comes from FILLER_RUNTIME: it walks shadow roots and same-origin
     // iframes. The harvest used to duplicate a plain document.querySelector,
@@ -746,13 +912,10 @@ export function buildComboboxHarvestScript(fieldIds, generation = null) {
       return;
     }
 
-    try {
-      el.focus();
-      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
-    } catch (e) {}
+    openDropdown(el);
 
     waitForOptions(el, function(listbox, opts) {
+      if (!afIsCurrent()) { post(); return; }
       if (opts.length) {
         results[afId] = opts;
         prevListbox = listbox;
@@ -786,7 +949,7 @@ function buildGroupMeta(fields) {
   return meta;
 }
 
-export function buildFillScript(mapping, profileJson, fields, optionSelections = {}) {
+export function buildFillScript(mapping, profileJson, fields, optionSelections = {}, generation = null) {
   // profileJson is already a JSON string (existing callers pass JSON.stringify(profile)).
   // Re-encode through safeJson to neutralise any embedded "</script>" sequence.
   const safeProfile = safeJson(JSON.parse(profileJson));
@@ -805,7 +968,7 @@ export function buildFillScript(mapping, profileJson, fields, optionSelections =
 
   var filled = 0;
   var outcomes = {};
-  Object.keys(mapping).forEach(function(fieldId) {
+  forEachField(Object.keys(mapping), function(fieldId) {
     var profileKey = mapping[fieldId];
     if (!profileKey) return;
 
@@ -821,6 +984,13 @@ export function buildFillScript(mapping, profileJson, fields, optionSelections =
       val = optionSelections[fieldId];
     }
     if (val === undefined || val === null || val === '') { outcomes[fieldId] = 'no-value'; return; }
+
+    // Non-scalar profile values (education/experience arrays of objects) have
+    // no sane string form — String() would type "[object Object]" into the field.
+    if (Array.isArray(val)) {
+      val = val.filter(function(v) { return v != null && typeof v !== 'object'; }).join(', ');
+    }
+    if (typeof val === 'object' || val === '') { outcomes[fieldId] = 'no-value'; return; }
 
     // Radio / checkbox group: routed via options[], not a single el.
     var meta = groupMeta[fieldId];
@@ -838,7 +1008,16 @@ export function buildFillScript(mapping, profileJson, fields, optionSelections =
     var el = findEl(fieldId);
     if (!el) { outcomes[fieldId] = 'control-failed'; return; }
 
-    if (CHIP_KEYS[profileKey] && (el.getAttribute('role') === 'combobox' ||
+    if (profileKey === 'phone') val = normalisePhone(val, profile.country, el);
+    // Workday rejects the equivalent LinkedIn URL without the www host.
+    if (profileKey === 'linkedIn') val = String(val).trim().replace(/^(?:https?:\\/\\/)?(?:www\\.)?linkedin\\.com\\//i, 'https://www.linkedin.com/');
+
+    if (CHIP_KEYS[profileKey] && isWorkdaySelect(el) && !el.__afUserEdited) {
+      var choices = String(val).split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+      return fillWorkdaySelect(el, choices).then(record, function() { record(false); });
+    }
+
+    if (el.tagName === 'INPUT' && !el.__afUserEdited && CHIP_KEYS[profileKey] && (el.getAttribute('role') === 'combobox' ||
         el.getAttribute('aria-haspopup') === 'listbox')) {
       var values = String(val).split(',').map(function(s) { return s.trim(); }).filter(Boolean);
       fillChips(el, values);
@@ -847,15 +1026,20 @@ export function buildFillScript(mapping, profileJson, fields, optionSelections =
       return;
     }
 
-    if (fillOne(el, val)) { filled++; outcomes[fieldId] = 'filled'; }
-    else outcomes[fieldId] = 'control-failed';
-  });
-
+    function record(ok) {
+      outcomes[fieldId] = ok ? 'filled' : 'control-failed';
+      if (ok) filled++;
+    }
+    var result = fillOne(el, val);
+    if (result && result.then) return result.then(record, function() { record(false); });
+    record(result);
+  }, function() {
   if (window.ReactNativeWebView) {
     window.ReactNativeWebView.postMessage(JSON.stringify({
-      type: 'FILL_COMPLETE', filled: filled, outcomes: outcomes
+      type: 'FILL_COMPLETE', epoch: afEpoch, filled: filled, outcomes: outcomes${generation == null ? '' : ', generation: ' + safeJson(generation)}
     }));
   }
+  });
 })();
   `;
 }
@@ -932,13 +1116,7 @@ export function buildCorrectionListenerScript(filledAfIds) {
     var value = '';
 
     if (type === 'checkbox' || type === 'radio') {
-      // Only learn checked state. Unchecking is not learned because (1) it would
-      // require storing a separate "off" value, but the replay path (buildFillScript
-      // -> fillOne) has no logic to set .checked = false based on a stored value,
-      // and (2) for checkbox groups, only the checked option is semantically meaningful.
-      // Standalone boolean checkboxes don't round-trip correctly through the existing
-      // replay system, which only sets .value, not .checked. Changing this would
-      // require redesigning either the storage format or the replay path.
+      // Legacy learning records selected option labels; the answer sheet captures standalone Yes/No answers.
       if (!el.checked) return;
       var lid = el.getAttribute('id');
       var lab = null;

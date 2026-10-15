@@ -293,6 +293,7 @@ export default function ProfileScreen() {
                             <Text style={styles.memCorrectionValue} numberOfLines={2}>
                               {item.value}
                             </Text>
+                            {!!item.host && <Text style={styles.memFieldLabel} numberOfLines={1}>{item.host}</Text>}
                           </View>
                           <TouchableOpacity
                             onPress={() => handleDeleteCorrection(item.fingerprint)}

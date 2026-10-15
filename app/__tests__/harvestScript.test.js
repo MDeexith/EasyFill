@@ -383,7 +383,7 @@ describe('buildComboboxHarvestScript - runtime behavior', () => {
     ]);
   });
 
-  test('an aria-controls target marked aria-hidden falls through to the generic search', () => {
+  test('a hidden aria-controls target never borrows an unrelated visible menu', () => {
     const dom = createHarvestDOM();
     const hidden = fakeListbox(['Stale'], { 'aria-hidden': 'true' });
     const visible = fakeListbox(['Live A', 'Live B']);
@@ -394,10 +394,7 @@ describe('buildComboboxHarvestScript - runtime behavior', () => {
 
     runHarvest(buildComboboxHarvestScript(['af_1']), dom);
 
-    expect(dom.messages[0].options.af_1).toEqual([
-      { value: 'Live A', label: 'Live A' },
-      { value: 'Live B', label: 'Live B' },
-    ]);
+    expect(dom.messages[0].options.af_1).toBeUndefined();
   });
 
   test('a menu that appears only after several polls is still harvested', () => {

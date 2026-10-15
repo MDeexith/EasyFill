@@ -11,7 +11,6 @@ import {
   BackHandler,
   Linking,
   PanResponder,
-  useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import WebView from 'react-native-webview';
@@ -20,8 +19,22 @@ import Icon from '../components/Icon';
 import { theme } from '../theme/tokens';
 import { FORM_SCANNER_JS } from '../webview/formScanner';
 
-import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript, buildComboboxHarvestScript, mergeFillOutcomes } from '../webview/filler';
+import { buildFillScript, buildDirectFillScript, buildCorrectionListenerScript, buildComboboxHarvestScript, buildResumeAttachScript, mergeFillOutcomes } from '../webview/filler';
+
+// file:// path -> base64 payload for in-page File construction. RN's fetch
+// handles file:// and content:// URIs natively; FileReader gives a data: URL.
+async function readFileBase64(path) {
+  const uri = /^(file|content):\/\//.test(path) ? path : 'file://' + path;
+  const blob = await (await fetch(uri)).blob();
+  return await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.onerror = reject;
+    r.readAsDataURL(blob);
+  });
+}
 import { createHarvestCoordinator } from '../webview/harvestCoordinator';
+import { fieldIdentity, selectChangedFields, selectResumeFields } from '../webview/formState';
 import { matchFieldsToProfile } from '../matcher';
 import {
   selectUncoveredFields,
@@ -33,6 +46,8 @@ import { resolveLocally, resolveWithAi, DROPDOWN_WIDGET_NAMES } from '../matcher
 import { generateText } from '../api/backend';
 import { loadProfile, addHistoryEntry, loadFieldCorrections, mergeFieldCorrections } from '../profile/store';
 import { enrichProfile } from '../profile/enrich';
+import ApplicationAnswersSheet from '../components/ApplicationAnswersSheet';
+import { answerKey, isAcknowledgment, remainingQuestions, savedAnswers, answersToRemember } from '../profile/applicationAnswers';
 
 function getHostname(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
@@ -178,17 +193,16 @@ export default function BrowserScreen({ route, navigation }) {
   const [fields, setFields] = useState([]);
   const [phase, setPhase] = useState('loading');
   // phase: loading | detected | panel | filling | filling-ai | drafting | filled | ats-loading
-  const [filledCount, setFilledCount] = useState(0);
   const [draftProgress, setDraftProgress] = useState({ current: 0, total: 0 });
   const [tracked, setTracked] = useState(false);
   const [webViewCanGoBack, setWebViewCanGoBack] = useState(false);
   const [fillStats, setFillStats] = useState({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
   const [fillOutcomes, setFillOutcomes] = useState({});
+  const filledCount = Object.values(fillOutcomes).filter(outcome => outcome === 'filled').length;
   const [pendingCorrections, setPendingCorrections] = useState({});
   const [multiStepActive, setMultiStepActive] = useState(false);
   const [stepCount, setStepCount] = useState(1);
   const multiStepActiveRef = useRef(false);
-  const filledUrlsRef = useRef(new Set());
   // Cloudflare recovery: once a challenge is seen we swap to an
   // Android-consistent UA for the rest of this browser session.
   const [userAgent, setUserAgent] = useState(WEBVIEW_USER_AGENT);
@@ -200,11 +214,9 @@ export default function BrowserScreen({ route, navigation }) {
   // ATS detector doesn't try to navigate to the same URL again.
   const lastAtsSrcRef = useRef(initialUrl !== url ? initialUrl : '');
 
-  const { width: screenW, height: screenH } = useWindowDimensions();
-  const FAB_W = 180;
-  const FAB_H = 46;
-
-  const fabPos = useRef({ x: screenW - FAB_W - 14, y: screenH - FAB_H - 22 - 44 });
+  const browserSize = useRef({ width: 0, height: 0 });
+  const fabSize = useRef({ width: 0, height: 0 });
+  const fabPos = useRef({ x: 0, y: 0 });
   const fabPan = useRef(new Animated.ValueXY(fabPos.current)).current;
   const isDragging = useRef(false);
 
@@ -223,8 +235,10 @@ export default function BrowserScreen({ route, navigation }) {
       },
       onPanResponderRelease: (_, g) => {
         fabPan.flattenOffset();
-        const clampedX = Math.max(8, Math.min(fabPos.current.x + g.dx, screenW - FAB_W - 8));
-        const clampedY = Math.max(8, Math.min(fabPos.current.y + g.dy, screenH - FAB_H - 80));
+        const minX = Math.min(0, fabSize.current.width + 28 - browserSize.current.width);
+        const minY = Math.min(0, fabSize.current.height + 28 - browserSize.current.height);
+        const clampedX = Math.max(minX, Math.min(fabPos.current.x + g.dx, 0));
+        const clampedY = Math.max(minY, Math.min(fabPos.current.y + g.dy, 0));
         fabPos.current = { x: clampedX, y: clampedY };
         Animated.spring(fabPan, {
           toValue: { x: clampedX, y: clampedY },
@@ -257,6 +271,41 @@ export default function BrowserScreen({ route, navigation }) {
   // that step is never filled at all. Last call wins; drained in the finally.
   const pendingAutofillRef = useRef(null);
   const doAutofillRef = useRef(null);
+  // Reuse the keyed bridge coordinator for fill completion as well as harvests.
+  const fillCoordinatorRef = useRef(createHarvestCoordinator());
+  const autofillEpochRef = useRef(0);
+  const autoStepTimerRef = useRef(null);
+  const nextFieldsRef = useRef(new Map());
+
+  const cancelAutofill = useCallback(() => {
+    autofillEpochRef.current += 1;
+    clearTimeout(autoStepTimerRef.current);
+    nextFieldsRef.current.clear();
+    pendingAutofillRef.current = null;
+    harvestCoordinatorRef.current.cancel();
+    fillCoordinatorRef.current.cancel();
+    webViewRef.current?.injectJavaScript(
+      `window.__AF_FILL_EPOCH__ = ${autofillEpochRef.current}; true;`
+    );
+  }, []);
+
+  useEffect(() => () => cancelAutofill(), [cancelAutofill]);
+
+  const fillPage = useCallback(async (build, count, epoch) => {
+    if (epoch !== autofillEpochRef.current) return {};
+    const result = await fillCoordinatorRef.current.startHarvest(generation => {
+      webViewRef.current?.injectJavaScript(
+        `window.__AF_FILL_EPOCH__ = ${epoch};` + build(generation)
+      );
+    }, 5000 + count * 8000);
+    if (epoch !== autofillEpochRef.current) return {};
+    if (!result.outcomes) {
+      cancelAutofill();
+      setPhase(previous => ['filling', 'filling-ai', 'drafting'].includes(previous) ? 'detected' : previous);
+      throw new Error('The page did not confirm autofill completion. Please try again.');
+    }
+    return result.outcomes;
+  }, [cancelAutofill]);
 
   // Single entry point for scanner injection. Skips the scanner entirely on
   // Cloudflare interstitials — crawling / mutating the challenge page trips
@@ -333,7 +382,6 @@ export default function BrowserScreen({ route, navigation }) {
   }, [phase, panelAnim]);
 
   useEffect(() => { multiStepActiveRef.current = multiStepActive; }, [multiStepActive]);
-  useEffect(() => { fieldsRef.current = fields; }, [fields]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') return;
@@ -347,7 +395,7 @@ export default function BrowserScreen({ route, navigation }) {
     return () => sub.remove();
   }, [webViewCanGoBack]);
 
-  const doAiDraft = useCallback(async (longs) => {
+  const doAiDraft = useCallback(async (longs, epoch) => {
     if (!longs || longs.length === 0) return;
     setPhase('drafting');
     setDraftProgress({ current: 0, total: longs.length });
@@ -364,7 +412,7 @@ export default function BrowserScreen({ route, navigation }) {
     let completed = 0;
 
     async function worker() {
-      while (true) {
+      while (epoch === autofillEpochRef.current) {
         const i = nextIdx++;
         if (i >= longs.length) return;
         const f = longs[i];
@@ -386,9 +434,10 @@ export default function BrowserScreen({ route, navigation }) {
     const workerCount = Math.min(DRAFT_CONCURRENCY, longs.length);
     await Promise.all(Array.from({ length: workerCount }, worker));
 
+    if (epoch !== autofillEpochRef.current) return;
     if (Object.keys(drafts).length > 0) {
-      const script = buildDirectFillScript(drafts);
-      webViewRef.current?.injectJavaScript(script);
+      await fillPage(gen => buildDirectFillScript(drafts, gen), Object.keys(drafts).length, epoch);
+      if (epoch !== autofillEpochRef.current) return;
       // Drafts land after doAutofill already installed the listener, so tell
       // the (already-installed) listener about them — otherwise a generated
       // cover letter blurring out reads as a user-authored correction.
@@ -400,40 +449,58 @@ export default function BrowserScreen({ route, navigation }) {
     } else {
       setPhase('filled');
     }
-  }, []);
+  }, [fillPage]);
 
   // Unified autofill: two-pass progressive fill.
   // Pass 1 (cache + regex) injects immediately; Pass 2 (AI) fills remaining in background.
   const doAutofill = useCallback(async (scanned) => {
     if (autofillInFlightRef.current) {
       console.warn('[autofill] run already in flight — queueing this call');
-      pendingAutofillRef.current = scanned;
+      pendingAutofillRef.current = [...new Map(
+        [...(pendingAutofillRef.current || []), ...scanned].map(f => [f.id, f])
+      ).values()];
       return;
     }
+    scanned = scanned.filter(f => !f.disabled && (f.visible !== false || f.widget === 'file'));
+    if (!scanned.length) return;
     autofillInFlightRef.current = true;
+    const epoch = autofillEpochRef.current;
+    const current = () => epoch === autofillEpochRef.current;
+    multiStepActiveRef.current = true;
+    setMultiStepActive(true);
     setPhase('filling');
     setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
-    // af-ids are handed out afresh (af_1..af_N) on every scan, so a verdict
-    // kept from a previous page or a previous run collides by id with a
-    // completely different field. Start each run from a clean slate.
-    setFillOutcomes({});
-    filledUrlsRef.current.add(urlRef.current);
+    // Outcomes remain keyed by the scanner's stable ids for this page.
     try {
       const profile = enrichProfile(loadProfile());
       const host = getHostname(urlRef.current);
+      const fillCount = mapping => Object.values(mapping).reduce((count, key) => count +
+        (key === 'skills' || key === 'languages' ? String(profile[key] || '').split(',').length : 1), 0);
+
+      // Explicit answers take precedence over profile guesses and cached mappings.
+      const remembered = savedAnswers(scanned, urlRef.current, loadFieldCorrections());
+      const rememberedOutcomes = Object.keys(remembered).length
+        ? await fillPage(gen => buildDirectFillScript(remembered, gen), Object.keys(remembered).length, epoch) : {};
+      if (!current()) return;
+      const rememberedIds = Object.keys(rememberedOutcomes).filter(id => rememberedOutcomes[id] === 'filled');
+      scanned = scanned.filter(f => !(f.id in remembered) && !f.hasValue && !isAcknowledgment(f));
 
       // ── PASS 1: cache + regex (no AI) ───────────────────────────────────
       const { mapping: fastMapping, decisions: fastDecisions } =
         await matchFieldsToProfile(scanned, profile, false, host);
+
+      if (!current()) return;
 
       // Resolve dropdown options locally (no AI) so the fast pass fills the
       // correct option (e.g. profile "USA" -> option "United States").
       const { selections: localSelections } =
         resolveLocally(scanned, fastMapping, profile);
 
-      webViewRef.current?.injectJavaScript(
-        buildFillScript(fastMapping, JSON.stringify(profile), scanned, localSelections)
+      const fastOutcomes = await fillPage(
+        gen => buildFillScript(fastMapping, JSON.stringify(profile), scanned, localSelections, gen),
+        fillCount(fastMapping), epoch
       );
+      if (!current()) return;
 
       let autoMatched = 0, regexMatched = 0;
       for (const dec of Object.values(fastDecisions || {})) {
@@ -461,11 +528,14 @@ export default function BrowserScreen({ route, navigation }) {
       // Hoisted (not just local to the `if` below) so the dropdown-harvest
       // block further down can exclude fields this pass already resolved.
       let aiLocalSelections = {};
+      let aiOutcomes = {};
 
       if (uncovered.length > 0) {
         try {
           const { mapping: aiMapping, decisions: aiDecisions } =
             await matchFieldsToProfile(uncovered, profile, true, null);
+
+          if (!current()) return;
 
           // Cross-pass dedup: skip keys already owned by fast pass
           for (const [id, key] of Object.entries(aiMapping)) {
@@ -475,9 +545,11 @@ export default function BrowserScreen({ route, navigation }) {
           if (Object.keys(safeAiMapping).length > 0) {
             // Resolve dropdown options locally for AI-mapped fields too.
             aiLocalSelections = resolveLocally(uncovered, safeAiMapping, profile).selections;
-            webViewRef.current?.injectJavaScript(
-              buildFillScript(safeAiMapping, JSON.stringify(profile), uncovered, aiLocalSelections)
+            aiOutcomes = await fillPage(
+              gen => buildFillScript(safeAiMapping, JSON.stringify(profile), uncovered, aiLocalSelections, gen),
+              fillCount(safeAiMapping), epoch
             );
+            if (!current()) return;
           }
 
           let aiMatched = 0;
@@ -492,6 +564,8 @@ export default function BrowserScreen({ route, navigation }) {
           console.warn('[autofill] AI pass failed:', err?.message || err);
         }
       }
+
+      if (!current()) return;
 
       // ── Dropdown resolution ─────────────────────────────────────────────
       // Options for React-Select style comboboxes do not exist until the menu
@@ -514,9 +588,12 @@ export default function BrowserScreen({ route, navigation }) {
             // No value to select => nothing to resolve; don't pay the cost of
             // opening the menu (and don't risk perturbing the page) for it.
             hasUsableProfileValue(profile, combinedMapping[f.id]) &&
+            // A comma list must be selected item by item, not resolved as one option.
+            !(['skills', 'languages'].includes(combinedMapping[f.id]) &&
+              String(profile[combinedMapping[f.id]]).includes(',')) &&
             DROPDOWN_WIDGET_NAMES.includes(f.widget) &&
-            !localSelections[f.id] &&
-            !aiLocalSelections[f.id]
+            fastOutcomes[f.id] !== 'filled' &&
+            aiOutcomes[f.id] !== 'filled'
           )
           .map(f => f.id);
 
@@ -525,8 +602,9 @@ export default function BrowserScreen({ route, navigation }) {
             gen => webViewRef.current?.injectJavaScript(
               buildComboboxHarvestScript(dropdownIds, gen)
             ),
-            8000
+            2000 + dropdownIds.length * 1200
           );
+          if (!current()) return;
 
           // Attach the harvested options so isDropdown() finally passes.
           const withOptions = scanned
@@ -538,20 +616,25 @@ export default function BrowserScreen({ route, navigation }) {
 
           if (Object.keys(selections).length > 0) {
             dropdownFilledIds.push(...Object.keys(selections));
-            webViewRef.current?.injectJavaScript(buildDirectFillScript(selections));
+            await fillPage(gen => buildDirectFillScript(selections, gen), Object.keys(selections).length, epoch);
+            if (!current()) return;
           }
 
           if (unresolved.length > 0) {
             const aiSelections = await resolveWithAi(unresolved, combinedMapping, profile);
+            if (!current()) return;
             if (Object.keys(aiSelections).length > 0) {
               dropdownFilledIds.push(...Object.keys(aiSelections));
-              webViewRef.current?.injectJavaScript(buildDirectFillScript(aiSelections));
+              await fillPage(gen => buildDirectFillScript(aiSelections, gen), Object.keys(aiSelections).length, epoch);
+              if (!current()) return;
             }
           }
         }
       } catch (err) {
         console.warn('[autofill] dropdown resolution failed:', err?.message || err);
       }
+
+      if (!current()) return;
 
       // Apply saved corrections for fields the profile didn't cover.
       // "Covered" must mean actually filled by one of the passes above — the
@@ -564,12 +647,39 @@ export default function BrowserScreen({ route, navigation }) {
       const correctionFills = {};
       for (const f of scanned) {
         if (coveredMapping[f.id] && hasUsableProfileValue(profile, coveredMapping[f.id])) continue;
+        // Never replay corrections into hidden fields: custom dropdowns keep a
+        // display:none <select> twin whose fingerprint matches the visible
+        // widget's, and a correction recorded against either would land
+        // invisibly (and can poison the real widget's state).
+        if (f.visible === false || f.hasValue || isAcknowledgment(f)) continue;
         const fp = [f.name||'', f.label||'', f.type||'', f.autocomplete||''].join('|');
         if (fp.split('|').filter(Boolean).length < 2) continue;
         if (corrections[fp] !== undefined) correctionFills[f.id] = corrections[fp];
       }
       if (Object.keys(correctionFills).length > 0) {
-        webViewRef.current?.injectJavaScript(buildDirectFillScript(correctionFills));
+        await fillPage(gen => buildDirectFillScript(correctionFills, gen), Object.keys(correctionFills).length, epoch);
+        if (!current()) return;
+      }
+
+      // ── Resume attach ───────────────────────────────────────────────────
+      // Only identified resume fields: a single upload can still be a cover letter.
+      const resumeAttachedIds = [];
+      try {
+        if (profile.resumeFilePath) {
+          const targets = selectResumeFields(scanned);
+          if (targets.length > 0) {
+            const b64 = await readFileBase64(profile.resumeFilePath);
+            if (!current()) return;
+            if (b64) {
+              resumeAttachedIds.push(...targets.map(f => f.id));
+              webViewRef.current?.injectJavaScript(
+                buildResumeAttachScript(resumeAttachedIds, b64, profile.resumeFileName)
+              );
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[autofill] resume attach failed:', err?.message || err);
       }
 
       // Every id this run actually wrote to, not just the fast pass's. The old
@@ -582,24 +692,24 @@ export default function BrowserScreen({ route, navigation }) {
         fastMapping,
         aiMapping: safeAiMapping,
         profile,
-        dropdownIds: dropdownFilledIds,
-        correctionIds: Object.keys(correctionFills),
+        dropdownIds: [...dropdownFilledIds, ...resumeAttachedIds],
+        correctionIds: [...Object.keys(correctionFills), ...rememberedIds],
       });
       webViewRef.current?.injectJavaScript(
         buildCorrectionListenerScript(filledAfIds)
       );
 
-      setMultiStepActive(true);
+      if (!current()) return;
 
       const longs = scanned.filter(f => f.longform);
       if (longs.length > 0) {
-        await doAiDraft(longs);
+        await doAiDraft(longs, epoch);
       } else {
         setPhase('filled');
       }
-    } catch {
-      filledUrlsRef.current.delete(urlRef.current);
-      setPhase('detected');
+    } catch (err) {
+      console.warn('[autofill] fill failed:', err?.message || err);
+      if (current()) setPhase('detected');
     } finally {
       autofillInFlightRef.current = false;
       const queued = pendingAutofillRef.current;
@@ -607,20 +717,86 @@ export default function BrowserScreen({ route, navigation }) {
       // Drained via a ref so the retry doesn't make doAutofill a dependency
       // of itself. Cleared before the retry runs, so a queued run cannot
       // re-queue itself into a loop.
-      if (queued) setTimeout(() => doAutofillRef.current?.(queued), 300);
+      if (queued) {
+        const ids = new Set(queued.map(f => f.id));
+        doAutofillRef.current?.(fieldsRef.current.filter(f => ids.has(f.id)));
+      }
     }
-  }, [doAiDraft]);
+  }, [doAiDraft, fillPage]);
 
   useEffect(() => { doAutofillRef.current = doAutofill; }, [doAutofill]);
 
+  async function prepareApplicationAnswers() {
+    if (autofillInFlightRef.current) throw new Error('Wait for autofill to finish, then try again.');
+    cancelAutofill();
+    autofillInFlightRef.current = true;
+    try {
+      const epoch = autofillEpochRef.current;
+      const pageUrl = urlRef.current;
+      const unanswered = remainingQuestions(fieldsRef.current, fillOutcomes);
+      const ids = unanswered.filter(f => DROPDOWN_WIDGET_NAMES.includes(f.widget) && !f.options?.length).map(f => f.id);
+      const options = ids.length ? await harvestCoordinatorRef.current.startHarvest(
+        gen => webViewRef.current?.injectJavaScript(buildComboboxHarvestScript(ids, gen)),
+        2000 + ids.length * 1200,
+      ) : {};
+      if (epoch !== autofillEpochRef.current) throw new Error('The page changed. Close and reopen the questions.');
+      return { epoch, url: pageUrl, fields: unanswered.map(f => ({ ...f, options: (options[f.id] || f.options || [])
+        .filter(option => option.value && option.label && !/^(select one|please select|select|choose one)$/i.test(option.label.trim())) })) };
+    } finally {
+      autofillInFlightRef.current = false;
+      const queued = pendingAutofillRef.current;
+      pendingAutofillRef.current = null;
+      if (queued) {
+        const ids = new Set(queued.map(field => field.id));
+        doAutofillRef.current?.(fieldsRef.current.filter(field => ids.has(field.id)));
+      }
+    }
+  }
+
+  async function fillApplicationAnswers(session, answers) {
+    if (autofillInFlightRef.current) throw new Error('Wait for autofill to finish, then try again.');
+    if (session.epoch !== autofillEpochRef.current || session.url !== urlRef.current) {
+      throw new Error('The page changed. Close and reopen the questions.');
+    }
+    const currentFields = new Map(fieldsRef.current.map(field => [field.id, field]));
+    if (session.fields.some(field => !currentFields.has(field.id) || fieldIdentity(field) !== fieldIdentity(currentFields.get(field.id)))) {
+      throw new Error('The questions changed. Close and reopen the questions.');
+    }
+    autofillInFlightRef.current = true;
+    try {
+      const selections = {};
+      for (const field of session.fields) {
+        const value = answers[field.id];
+        if (typeof value !== 'string' || !value.trim()) continue;
+        if (DROPDOWN_WIDGET_NAMES.includes(field.widget) && !field.options.some(option => option.value === value)) continue;
+        selections[field.id] = value.trim();
+      }
+      const outcomes = await fillPage(gen => buildDirectFillScript(selections, gen, true), Object.keys(selections).length, session.epoch);
+      if (session.epoch !== autofillEpochRef.current) throw new Error('The page changed. Check your answers on the page.');
+      mergeFieldCorrections(answersToRemember(session.fields, selections, outcomes, session.url));
+      webViewRef.current?.injectJavaScript(buildCorrectionListenerScript(Object.keys(selections).filter(id => outcomes[id] === 'filled')));
+      return session.fields.filter(f => outcomes[f.id] !== 'filled').map(f => f.id);
+    } finally {
+      autofillInFlightRef.current = false;
+      const queued = pendingAutofillRef.current;
+      pendingAutofillRef.current = null;
+      if (queued) {
+        const ids = new Set(queued.map(field => field.id));
+        doAutofillRef.current?.(fieldsRef.current.filter(field => ids.has(field.id)));
+      }
+    }
+  }
+
   const manualRescan = useCallback(() => {
+    cancelAutofill();
+    fieldsRef.current = [];
+    multiStepActiveRef.current = false;
     setPhase('loading');
     setFields([]);
     setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
     setFillOutcomes({});
     setMultiStepActive(false);
     setStepCount(1);
-    filledUrlsRef.current.clear();
     // Clear ALL guards so the scanner re-runs from scratch and ATS detection
     // can re-fire (otherwise stale __AF_ATS_REPORTED__ entries silence repeats).
     lastAtsSrcRef.current = '';
@@ -632,7 +808,7 @@ export default function BrowserScreen({ route, navigation }) {
       'true;'
     );
     injectScanner();
-  }, [injectScanner]);
+  }, [injectScanner, cancelAutofill]);
 
   const handleSaveCorrections = useCallback(() => {
     mergeFieldCorrections(pendingCorrections);
@@ -692,24 +868,38 @@ export default function BrowserScreen({ route, navigation }) {
   const onMessage = useCallback((event) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
+      if (data.epoch !== undefined && data.epoch !== autofillEpochRef.current) return;
 
-      if (data.type === 'FIELDS_SCANNED') {
+      if (data.type === 'FIELDS_SCANNED' || data.type === 'FIELDS_UPDATED') {
         const scanned = data.fields || [];
+        const previous = fieldsRef.current;
+        let added = selectChangedFields(previous, scanned);
+        const byId = new Map(scanned.map(f => [f.id, f]));
+        const replaced = previous.some(f => f.visible !== false && (
+          !byId.has(f.id) || byId.get(f.id).visible === false ||
+          fieldIdentity(f) !== fieldIdentity(byId.get(f.id))
+        ));
+        if (replaced) {
+          cancelAutofill();
+          setFillOutcomes({});
+          // Cancellation also interrupted unchanged fields later in the batch.
+          added = selectChangedFields([], scanned);
+          if (!added.length) setPhase(scanned.length ? 'detected' : 'no-fields');
+        }
+        fieldsRef.current = scanned;
         setFields(scanned);
-        if (scanned.length > 0) {
-          if (
-            multiStepActiveRef.current &&
-            !filledUrlsRef.current.has(urlRef.current)
-          ) {
-            filledUrlsRef.current.add(urlRef.current);
-            setStepCount(prev => prev + 1);
-            setTimeout(() => doAutofill(scanned), 600);
-          } else {
-            setPhase(prev =>
-              (prev === 'loading' || prev === 'no-fields' || prev === 'ats-loading')
-                ? 'detected' : prev
-            );
-          }
+        if (multiStepActiveRef.current && added.length > 0) {
+          if (replaced || previous.length === 0) setStepCount(n => n + 1);
+          added.forEach(f => nextFieldsRef.current.set(f.id, f));
+          clearTimeout(autoStepTimerRef.current);
+          autoStepTimerRef.current = setTimeout(() => {
+            const ids = new Set(nextFieldsRef.current.keys());
+            nextFieldsRef.current.clear();
+            doAutofillRef.current?.(fieldsRef.current.filter(f => ids.has(f.id)));
+          }, 600);
+        } else {
+          setPhase(prev => ['loading', 'no-fields', 'ats-loading'].includes(prev)
+            ? (scanned.length ? 'detected' : 'no-fields') : prev);
         }
       }
 
@@ -747,32 +937,12 @@ export default function BrowserScreen({ route, navigation }) {
         }
       }
 
-      if (data.type === 'FIELDS_UPDATED') {
-        const newFields = data.fields || [];
-        if (newFields.length > 0) {
-          const existing = new Set(fieldsRef.current.map(f => f.id));
-          const added = newFields.filter(f => !existing.has(f.id));
-          setFields(prev => added.length > 0 ? [...prev, ...added] : prev);
-          if (
-            multiStepActiveRef.current &&
-            !filledUrlsRef.current.has(urlRef.current) &&
-            added.length > 0
-          ) {
-            filledUrlsRef.current.add(urlRef.current);
-            setStepCount(s => s + 1);
-            setTimeout(() => doAutofill(added), 600);
-          } else {
-            setPhase(prev =>
-              (prev === 'loading' || prev === 'no-fields' || prev === 'ats-loading')
-                ? 'detected' : prev
-            );
-          }
-        }
+      if (data.type === 'FILL_COMPLETE' || data.type === 'AI_FILL_COMPLETE') {
+        fillCoordinatorRef.current.deliver(data, data.generation);
       }
 
       if (data.type === 'FILL_COMPLETE') {
         const n = data.filled ?? 0;
-        setFilledCount(prev => prev + n);
         setFillOutcomes(prev => mergeFillOutcomes(prev, data.outcomes));
         setTracked(prev => {
           if (!prev && n > 0) {
@@ -791,9 +961,11 @@ export default function BrowserScreen({ route, navigation }) {
         setTimeout(() => setPhase(prev => prev === 'filling' ? 'filling-ai' : prev), 200);
       }
 
+      if (data.type === 'RESUME_ATTACHED') {
+        setFillOutcomes(prev => mergeFillOutcomes(prev, data.outcomes));
+      }
+
       if (data.type === 'AI_FILL_COMPLETE') {
-        const n = data.filled ?? 0;
-        setFilledCount(prev => prev + n);
         setFillOutcomes(prev => mergeFillOutcomes(prev, data.outcomes));
         setPhase(prev => prev === 'drafting' ? 'filled' : prev);
       }
@@ -836,15 +1008,15 @@ export default function BrowserScreen({ route, navigation }) {
         if (wasAutoFilled) return;
         setFields(currentFields => {
           const field = currentFields.find(f => f.id === afId);
-          if (!field) return currentFields;
-          const fp = [field.name||'', field.label||'', field.type||'', field.autocomplete||''].join('|');
-          if (fp.split('|').filter(Boolean).length < 2) return currentFields;
+          if (!field || isAcknowledgment(field) || field.type === 'password') return currentFields;
+          const fp = answerKey(field, urlRef.current);
+          if (!fp) return currentFields;
           setPendingCorrections(prev => ({ ...prev, [fp]: value }));
           return currentFields;
         });
       }
     } catch {}
-  }, [doAutofill, injectScanner]);
+  }, [cancelAutofill, injectScanner]);
 
   const host = getHostname(currentUrl);
 
@@ -880,13 +1052,24 @@ export default function BrowserScreen({ route, navigation }) {
         />
       </View>
 
-      <View style={{ flex: 1, position: 'relative' }}>
+      <View
+        style={{ flex: 1, position: 'relative' }}
+        onLayout={({ nativeEvent: { layout } }) => {
+          browserSize.current = layout;
+          // Anchor to the visible WebView when rotation or the keyboard resizes it.
+          fabPos.current = { x: 0, y: 0 };
+          fabPan.setOffset({ x: 0, y: 0 });
+          fabPan.setValue(fabPos.current);
+        }}
+      >
         <WebView
           ref={webViewRef}
           source={webViewSource}
           style={{ flex: 1, backgroundColor: '#fff' }}
           injectedJavaScriptBeforeContentLoaded={needsPreInject(currentUrl) ? PRE_INJECT_JS : undefined}
           onLoadStart={() => {
+            cancelAutofill();
+            fieldsRef.current = [];
             setLoading(true);
             setFields([]);
             setFillStats({ autoMatched: 0, aiMatched: 0, regexMatched: 0 });
@@ -910,6 +1093,8 @@ export default function BrowserScreen({ route, navigation }) {
             titleRef.current = state.title || '';
             // Catch SPA route changes that don't trigger onLoadEnd
             if (state.url && state.url !== lastInjectedUrl.current) {
+              cancelAutofill();
+              fieldsRef.current = [];
               lastInjectedUrl.current = state.url;
               setPhase(prev => prev === 'ats-loading' ? prev : 'loading');
               setFields([]);
@@ -923,10 +1108,10 @@ export default function BrowserScreen({ route, navigation }) {
                 const nextHost = new URL(state.url).hostname;
                 if (prevHost !== nextHost) {
                   lastAtsSrcRef.current = '';
+                  multiStepActiveRef.current = false;
                   setMultiStepActive(false);
                   setStepCount(1);
-                  filledUrlsRef.current.clear();
-                }
+                              }
               } catch {}
               // Clear scanner guard + ATS report cache so detection re-fires on new page.
               webViewRef.current?.injectJavaScript(
@@ -968,21 +1153,23 @@ export default function BrowserScreen({ route, navigation }) {
         {(phase === 'detected' || phase === 'filled' || phase === 'no-fields' || phase === 'filling-ai') && (
           <Animated.View
             {...panResponder.panHandlers}
+            onLayout={({ nativeEvent: { layout } }) => { fabSize.current = layout; }}
             style={[
               styles.fab,
               {
-                left: fabPan.x,
-                top: fabPan.y,
                 opacity: fabAnim,
-                transform: [{
-                  translateY: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }),
-                }],
+                transform: [
+                  { translateX: fabPan.x },
+                  { translateY: Animated.add(fabPan.y,
+                    fabAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] })) },
+                ],
               },
             ]}
           >
             <TouchableOpacity
               activeOpacity={0.85}
               style={styles.fabBtn}
+              onPressIn={() => { isDragging.current = false; }}
               onPress={() => {
                 if (isDragging.current) return;
                 if (phase === 'no-fields') manualRescan();
@@ -1001,7 +1188,7 @@ export default function BrowserScreen({ route, navigation }) {
                   strokeWidth={phase === 'filled' ? 3 : 2.5}
                 />
               </View>
-              <Text style={styles.fabText}>
+              <Text style={styles.fabText} numberOfLines={1}>
                 {phase === 'filling-ai'
                   ? `${filledCount} filled · AI matching…`
                   : phase === 'filled'
@@ -1081,6 +1268,9 @@ export default function BrowserScreen({ route, navigation }) {
                       Autofill {fieldCount} field{fieldCount === 1 ? '' : 's'}
                     </Text>
                   </TouchableOpacity>
+
+                  <ApplicationAnswersSheet count={remainingQuestions(fields, fillOutcomes).length}
+                    prepare={prepareApplicationAnswers} fill={fillApplicationAnswers} />
 
                   <View style={styles.panelFoot}>
                     <Icon name="zap" size={11} color={theme.colors.muted} />
@@ -1185,6 +1375,10 @@ const styles = StyleSheet.create({
   },
   fab: {
     position: 'absolute',
+    right: 14,
+    bottom: 14,
+    width: 240,
+    maxWidth: '90%',
   },
   fabBtn: {
     height: 46,
@@ -1206,6 +1400,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   fabText: {
+    flexShrink: 1,
     color: '#fff',
     fontSize: 13,
     fontFamily: theme.font.sans,

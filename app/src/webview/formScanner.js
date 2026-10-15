@@ -1,6 +1,10 @@
 export const FORM_SCANNER_JS = `
 (function() {
-  if (window.__AF_SCANNER_INSTALLED__) { return; }
+  if (window.__AF_SCANNER_INSTALLED__) {
+    if (window.__AF_RESCAN__) window.__AF_RESCAN__();
+    return;
+  }
+  if (window.__AF_SCANNER_CLEANUP__) window.__AF_SCANNER_CLEANUP__();
   window.__AF_SCANNER_INSTALLED__ = true;
 
   var AF_ATTR = 'data-af-id';
@@ -9,16 +13,16 @@ export const FORM_SCANNER_JS = `
     'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([aria-hidden="true"]),' +
     'textarea, select, [contenteditable=""], [contenteditable="true"], [role="textbox"],' +
     // Button-style and div-style dropdowns (Headless UI, Radix, Workday, etc.)
-    '[role="combobox"], [role="listbox"],' +
+    '[role="combobox"],' +
     'button[aria-haspopup="listbox"], button[aria-haspopup="menu"], button[aria-haspopup="true"],' +
     '[aria-haspopup="listbox"], [aria-haspopup="menu"],' +
     // ARIA-only radios/checkboxes (rare, but used by some custom controls)
     '[role="radio"], [role="checkbox"]';
 
   // Stable counter so af_<n> ids never collide
-  var afCounter = 0;
+  if (window.__AF_FIELD_COUNTER__ == null) window.__AF_FIELD_COUNTER__ = 0;
   // Field-set fingerprint to debounce no-op re-scans
-  var lastFingerprint = '';
+  var lastFingerprint = null;
   var stableScans = 0;
   var rescanTimer = null;
 
@@ -32,7 +36,7 @@ export const FORM_SCANNER_JS = `
     return false;
   }
 
-  var ATS_DOMAIN_RE = /\b(boards\.greenhouse\.io|job-boards\.greenhouse\.io|jobs\.lever\.co|app\.lever\.co|wd\d+\.myworkdayjobs\.com|apply\.workable\.com|smartrecruiters\.com|icims\.com|taleo\.net|jobvite\.com|ashbyhq\.com|recruitee\.com|bamboohr\.com)\b/i;
+  var ATS_DOMAIN_RE = /\\b(boards\\.greenhouse\\.io|job-boards\\.greenhouse\\.io|jobs\\.lever\\.co|app\\.lever\\.co|wd\\d+\\.myworkdayjobs\\.com|apply\\.workable\\.com|smartrecruiters\\.com|icims\\.com|taleo\\.net|jobvite\\.com|ashbyhq\\.com|recruitee\\.com|bamboohr\\.com)\\b/i;
 
   function reportAtsIframe(src) {
     if (!src || !window.ReactNativeWebView) return false;
@@ -250,7 +254,8 @@ export const FORM_SCANNER_JS = `
     return results;
   }
 
-  function preferredLabelFor(el) {
+  function preferredLabelFor(el, limit) {
+    limit = limit || 120;
     // 1. <label for="id">
     if (el.id) {
       try {
@@ -258,13 +263,13 @@ export const FORM_SCANNER_JS = `
         var root = (el.getRootNode && el.getRootNode()) || doc;
         var lbl = root.querySelector('label[for="' + CSS.escape(el.id) + '"]');
         if (!lbl && root !== doc) lbl = doc.querySelector('label[for="' + CSS.escape(el.id) + '"]');
-        if (lbl && lbl.innerText) return lbl.innerText.trim().slice(0, 120);
+        if (lbl && lbl.innerText) return lbl.innerText.trim().slice(0, limit);
       } catch (e) {}
     }
     // 2. wrapping <label>
     var p = el.parentElement;
     for (var i = 0; i < 3 && p; i++) {
-      if (p.tagName === 'LABEL' && p.innerText) return p.innerText.trim().slice(0, 120);
+      if (p.tagName === 'LABEL' && p.innerText) return p.innerText.trim().slice(0, limit);
       p = p.parentElement;
     }
     // 3. aria-labelledby
@@ -276,7 +281,7 @@ export const FORM_SCANNER_JS = `
         var firstId = llby.split(/\\s+/)[0];
         var target = (root2.getElementById ? root2.getElementById(firstId) : null)
                   || doc2.getElementById(firstId);
-        if (target && target.innerText) return target.innerText.trim().slice(0, 120);
+        if (target && target.innerText) return target.innerText.trim().slice(0, limit);
       } catch (e) {}
     }
     return '';
@@ -330,7 +335,8 @@ export const FORM_SCANNER_JS = `
       if (rawType === 'radio') return 'radio';
       if (rawType === 'checkbox') return 'checkbox';
       if (rawType === 'file') return 'file';
-      if (role === 'combobox' || hasPopup === 'listbox' || hasPopup === 'menu') {
+      if (role === 'combobox' || hasPopup === 'listbox' || hasPopup === 'menu' ||
+          el.getAttribute('data-uxi-widget-type') === 'selectinput') {
         return 'combobox-input';
       }
       return 'text';
@@ -350,14 +356,15 @@ export const FORM_SCANNER_JS = `
   // Group label for a radio/checkbox sibling-set (e.g. fieldset/legend, the
   // <div role="radiogroup" aria-labelledby="...">, or the heading text that
   // immediately precedes the group). Falls back to nearby text.
-  function getGroupLabelFor(el) {
+  function getGroupLabelFor(el, limit) {
+    limit = limit || 200;
     var p = el.parentElement;
     for (var i = 0; i < 6 && p; i++) {
       if (p.tagName === 'FIELDSET') {
         try {
           var lg = p.querySelector(':scope > legend');
           if (lg && lg.innerText && lg.innerText.trim()) {
-            return lg.innerText.trim().slice(0, 200);
+            return lg.innerText.trim().slice(0, limit);
           }
         } catch (e) {}
       }
@@ -368,11 +375,11 @@ export const FORM_SCANNER_JS = `
           try {
             var doc = el.ownerDocument || document;
             var ref = doc.getElementById(llby.split(/\\s+/)[0]);
-            if (ref && ref.innerText) return ref.innerText.trim().slice(0, 200);
+            if (ref && ref.innerText) return ref.innerText.trim().slice(0, limit);
           } catch (e) {}
         }
         var al = p.getAttribute && p.getAttribute('aria-label');
-        if (al) return al.trim().slice(0, 200);
+        if (al) return al.trim().slice(0, limit);
       }
       p = p.parentElement;
     }
@@ -403,6 +410,8 @@ export const FORM_SCANNER_JS = `
   // page (hamburger menus, "More options", etc.) as a form field. Require at
   // least one semantic identifier that ties the trigger to a form field.
   function isLabeledDropdownTrigger(el, label, ariaLabel, name, nearbyText) {
+    // Site language and navigation menus are not application answers.
+    if (el.closest && el.closest('nav, [role="navigation"], [role="banner"], [data-automation-id="header"]')) return false;
     if (label || ariaLabel || name) return true;
     if (el.id) return true;
     if (el.getAttribute && el.getAttribute('aria-labelledby')) return true;
@@ -457,7 +466,7 @@ export const FORM_SCANNER_JS = `
     var afId = el.getAttribute(AF_ATTR);
     if (!afId) {
       // Always use a synthetic id; never trust el.id (collisions in the wild)
-      afId = 'af_' + (afCounter++);
+      afId = 'af_' + (window.__AF_FIELD_COUNTER__++);
       try { el.setAttribute(AF_ATTR, afId); } catch (e) {}
     }
 
@@ -467,14 +476,53 @@ export const FORM_SCANNER_JS = `
     var contentEditable = isContentEditable(el);
     var widget = classifyWidget(el, tag, contentEditable);
 
-    var label = preferredLabelFor(el);
+    var question = preferredLabelFor(el, 4000);
+    var label = question.slice(0, 120);
     var ariaLabel = (el.getAttribute && el.getAttribute('aria-label')) || '';
+    if (!label && /^(button-dropdown|combobox-input|select)$/.test(widget) && el.closest) {
+      var fieldset = el.closest('fieldset');
+      // Workday questionnaire dropdowns use a legend plus a hidden input twin.
+      if (fieldset && Array.from(fieldset.querySelectorAll(INPUT_SELECTOR)).filter(function(control) {
+        return control.getClientRects().length > 0 && !(control.closest &&
+          control.closest('[role="listbox"], [role="menu"], [data-automation-id="responsiveMonikerPrompt"]'));
+      }).length === 1) {
+        question = getGroupLabelFor(el, 4000);
+        label = question.slice(0, 200);
+      }
+    }
+    if (widget === 'file' && !label && !ariaLabel && el.closest) {
+      var uploadGroup = el.closest('[role="group"][aria-labelledby]');
+      if (uploadGroup) label = preferredLabelFor(uploadGroup);
+    }
     var name = (el.getAttribute && el.getAttribute('name')) || '';
     var nearbyText = getNearbyText(el);
+
+    // display:none (self or ancestor) yields zero client rects. Hidden fields
+    // stay indexed (observers replay them when revealed) but carry the flag so
+    // the matcher can prefer the visible widget — e.g. a custom combobox whose
+    // hidden native <select> mirrors it would otherwise win the mapping and
+    // the fill would land invisibly.
+    var visible = true;
+    try { visible = !!(el.getClientRects && el.getClientRects().length); } catch (e) {}
+
+    var value = String(el.value || (widget === 'button-dropdown' || contentEditable ? el.textContent || '' : '')).trim();
+    var hasValue = !!value;
+    if (widget === 'checkbox' || widget === 'radio') {
+      hasValue = tag === 'input' ? !!el.checked : /^(true|mixed)$/.test(el.getAttribute('aria-checked') || '');
+    }
+    if (/^(select|button-dropdown|combobox-input)$/.test(widget)) {
+      var display = widget === 'select' && el.options && el.options[el.selectedIndex]
+        ? el.options[el.selectedIndex].text : value;
+      hasValue = !!value && !/^(select( one| an? option)?|please select|choose( one| an? option)?)[.\\s…*]*$/i.test(String(display || '').trim());
+      var selectedContainer = el.closest && el.closest('[data-automation-id="multiselectInputContainer"], [class*="-control"]');
+      if (selectedContainer && selectedContainer.querySelector('[data-automation-id="selectedItem"], [class*="-singleValue"], [class*="-multiValue"]')) hasValue = true;
+    }
 
     var desc = {
       id: afId,
       domId: el.id || '',
+      visible: visible,
+      disabled: !!(el.disabled || (el.readOnly && widget !== 'combobox-input') || (el.getAttribute && el.getAttribute('aria-disabled') === 'true')),
       name: name,
       tag: tag,
       type: inputType,
@@ -491,6 +539,8 @@ export const FORM_SCANNER_JS = `
       ariaHasPopup: (el.getAttribute && el.getAttribute('aria-haspopup')) || '',
       ariaControls: (el.getAttribute && el.getAttribute('aria-controls')) || '',
       label: label,
+      question: question || ariaLabel,
+      hasValue: hasValue,
       placeholder: (el.getAttribute && el.getAttribute('placeholder')) || '',
       ariaLabel: ariaLabel,
       nearbyText: nearbyText,
@@ -522,6 +572,7 @@ export const FORM_SCANNER_JS = `
   }
 
   function scanForms() {
+    if (window.__AF_RESCAN__ !== scanForms) return;
     var fields = [];
     var docs = getDocs(document);
     for (var d = 0; d < docs.length; d++) {
@@ -531,6 +582,8 @@ export const FORM_SCANNER_JS = `
         // Skip elements that are visually irrelevant (display:none ancestors are
         // common during hydration; we still index them so observers can replay).
         if (!el || !el.tagName) continue;
+        // Popup search boxes and option menus belong to their trigger.
+        if (el.closest && el.closest('[role="listbox"], [role="menu"], [data-automation-id="responsiveMonikerPrompt"]')) continue;
         try {
           fields.push(describeField(el));
         } catch (e) {}
@@ -593,6 +646,9 @@ export const FORM_SCANNER_JS = `
       grouped.push({
         id: first.id,
         domId: first.domId,
+        visible: members.some(function(m) { return m.visible; }),
+        hasValue: members.some(function(m) { return m.hasValue; }),
+        disabled: members.every(function(m) { return m.disabled; }),
         name: first.name,
         tag: first.tag,
         type: first.type,
@@ -620,18 +676,15 @@ export const FORM_SCANNER_JS = `
     unique = standalone.concat(grouped);
 
     // Stable fingerprint of the field set; suppress duplicate posts
-    var fp = unique.map(function(f) {
-      return f.id + ':' + f.name + ':' + f.type + ':' + f.autocomplete +
-        ':' + (f.options ? f.options.length : 0);
-    }).join('|');
+    var fp = JSON.stringify(unique);
 
-    if (fp === lastFingerprint && fp !== '') {
+    if (fp === lastFingerprint) {
       stableScans++;
     } else {
-      var isFirstScan = lastFingerprint === '';
+      var isFirstScan = lastFingerprint === null;
       lastFingerprint = fp;
       stableScans = 0;
-      if (unique.length > 0 && window.ReactNativeWebView) {
+      if (window.ReactNativeWebView) {
         window.ReactNativeWebView.postMessage(JSON.stringify({
           type: isFirstScan ? 'FIELDS_SCANNED' : 'FIELDS_UPDATED', fields: unique,
         }));
@@ -647,6 +700,27 @@ export const FORM_SCANNER_JS = `
     }, delay || 250);
   }
 
+  // Trusted typing while an AI request is pending belongs to the user.
+  function rememberUserEdit(event) {
+    if (!event.isTrusted) return;
+    var popup = event.target && event.target.closest && event.target.closest('[data-associated-widget]');
+    if (popup) {
+      var widgetId = popup.getAttribute('data-associated-widget');
+      var controls = document.querySelectorAll('[data-uxi-multiselect-id]');
+      for (var c = 0; c < controls.length; c++) {
+        if (widgetId && controls[c].getAttribute('data-uxi-multiselect-id') === widgetId) controls[c].__afUserEdited = true;
+      }
+    }
+    var path = event.composedPath ? event.composedPath() : [];
+    var target = path[0] || event.target;
+    if (target && target.closest) target = target.closest('[data-af-id]');
+    if (target) target.__afUserEdited = true;
+  }
+  document.addEventListener('input', rememberUserEdit, true);
+  document.addEventListener('change', rememberUserEdit, true);
+  document.addEventListener('pointerdown', rememberUserEdit, true);
+  document.addEventListener('keydown', rememberUserEdit, true);
+
   // ── triggers ─────────────────────────────────────────────────────────────
 
   // Eager Greenhouse detection — fires *before* iframe is even injected, by
@@ -659,6 +733,7 @@ export const FORM_SCANNER_JS = `
   try { pollForAtsIframes(); } catch (e) {}
   try { postDiag('install'); } catch (e) {}
 
+  window.__AF_RESCAN__ = scanForms;
   scanForms();
 
   if (document.readyState !== 'complete') {
@@ -701,7 +776,10 @@ export const FORM_SCANNER_JS = `
             try { reportAtsIframe(t.src || t.getAttribute('src') || ''); } catch (e) {}
             atsTrigger = true;
           }
-          else if (t && t.matches && t.matches(INPUT_SELECTOR)) trigger = true;
+          else if (t && t.matches && (t.matches(INPUT_SELECTOR) ||
+            (t.querySelector && t.querySelector(INPUT_SELECTOR)))) trigger = true;
+        } else if (mut.type === 'characterData' || (mut.removedNodes && mut.removedNodes.length)) {
+          trigger = true;
         } else if (mut.addedNodes && mut.addedNodes.length) {
           for (var n = 0; n < mut.addedNodes.length; n++) {
             var node = mut.addedNodes[n];
@@ -712,6 +790,7 @@ export const FORM_SCANNER_JS = `
               try { reportAtsIframe(node.src || node.getAttribute('src') || ''); } catch (e) {}
               trigger = true;
             } else if (
+              (node.matches && node.matches(INPUT_SELECTOR)) ||
               node.tagName === 'FORM' ||
               node.tagName === 'INPUT' ||
               node.tagName === 'TEXTAREA' ||
@@ -742,7 +821,8 @@ export const FORM_SCANNER_JS = `
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['name', 'id', 'autocomplete', 'type', 'role', 'aria-label', 'aria-labelledby', 'placeholder', 'style', 'class', 'hidden', 'src'],
+      characterData: true,
+      attributeFilter: ['name', 'id', 'autocomplete', 'type', 'role', 'aria-label', 'aria-labelledby', 'placeholder', 'style', 'class', 'hidden', 'src', 'disabled', 'readonly', 'aria-disabled'],
     });
   } catch (e) {}
 
@@ -788,5 +868,15 @@ export const FORM_SCANNER_JS = `
       childList: true, subtree: true,
     });
   } catch (e) {}
+  window.__AF_SCANNER_CLEANUP__ = function() {
+    if (observer) observer.disconnect();
+    if (visObs) visObs.disconnect();
+    if (inputAddObs) inputAddObs.disconnect();
+    if (rescanTimer) clearTimeout(rescanTimer);
+    document.removeEventListener('input', rememberUserEdit, true);
+    document.removeEventListener('change', rememberUserEdit, true);
+    document.removeEventListener('pointerdown', rememberUserEdit, true);
+    document.removeEventListener('keydown', rememberUserEdit, true);
+  };
 })();
 `;

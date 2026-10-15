@@ -60,6 +60,16 @@ function decideForField(field, regexDecision, aiDecision) {
   return null;
 }
 
+// Keys whose values are typed, never picked from a list. Used only as a
+// dedupe tie-breaker between a text control and a dropdown trigger.
+const FREE_TEXT_KEYS = new Set(['phone', 'email', 'firstName', 'lastName', 'name', 'address', 'zipCode']);
+
+function isTextControl(field) {
+  if (!field) return false;
+  const w = field.widget || '';
+  return w === 'text' || w === 'textarea' || w === 'contenteditable' || w === 'combobox-input';
+}
+
 function dedupe(decisions, fieldsById) {
   // For each singleton profile key, if multiple fields claim it, keep the
   // highest-confidence claimant; demote the rest to their next-best
@@ -73,7 +83,26 @@ function dedupe(decisions, fieldsById) {
 
   for (const [key, claimants] of Object.entries(byKey)) {
     if (claimants.length < 2) continue;
-    claimants.sort((a, b) => b.decision.confidence - a.decision.confidence);
+    // Visible field beats hidden regardless of confidence: custom dropdown
+    // widgets keep a display:none native <select> in sync, and filling that
+    // select changes nothing on screen. `!== false` keeps old scans (no
+    // visible flag) treated as visible.
+    claimants.sort((a, b) => {
+      const va = fieldsById[a.fieldId]?.visible !== false;
+      const vb = fieldsById[b.fieldId]?.visible !== false;
+      if (va !== vb) return va ? -1 : 1;
+      const dc = b.decision.confidence - a.decision.confidence;
+      if (dc !== 0) return dc;
+      // Confidence tie on a free-text key: the value can only be typed, so a
+      // text control beats a dropdown trigger (Workday: button name="phoneType"
+      // ties input name="phoneNumber" — the button must not steal the number).
+      if (FREE_TEXT_KEYS.has(key)) {
+        const ta = isTextControl(fieldsById[a.fieldId]);
+        const tb = isTextControl(fieldsById[b.fieldId]);
+        if (ta !== tb) return ta ? -1 : 1;
+      }
+      return 0;
+    });
     // Winner keeps the key; losers fall back to their next-best candidate.
     for (let i = 1; i < claimants.length; i++) {
       const { fieldId } = claimants[i];
@@ -147,6 +176,11 @@ export async function matchFieldsToProfile(fields, profile, useLlmFallback = tru
   for (const [id, dec] of Object.entries(decisions)) {
     if (dec && dec.key) mapping[id] = dec.key;
   }
+
+  console.log('[matcher] decisions:', JSON.stringify(
+    Object.fromEntries(Object.entries(decisions).map(([id, d]) =>
+      [id, d ? `${d.key}@${d.confidence}(${d.source})` : null]))
+  ));
 
   // Persist to cache if enough fields matched (skips single-field login boxes)
   if (hostname && Object.keys(mapping).length >= 3) {

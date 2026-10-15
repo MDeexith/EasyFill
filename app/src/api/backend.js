@@ -33,8 +33,8 @@ export function redactSensitive(profile) {
 
 export async function matchFields(fields, profile) {
   // The /match endpoint only does key-matching and ignores dropdown options;
-  // strip the (potentially large) options arrays to keep the payload small.
-  const slim = fields.map(({ options, ...rest }) => rest);
+  // Keep full local questions and value-state metadata out of the match payload.
+  const slim = fields.map(({ options, question, hasValue, ...rest }) => rest);
   const res = await axios.post(`${BASE_URL}/match`, { fields: slim, profile: redactSensitive(profile) }, { timeout: LLM_TIMEOUT });
   // Prefer `decisions` — it carries per-field confidence, which the matcher
   // needs to rank AI against regex. `mapping` is the flat legacy shape kept

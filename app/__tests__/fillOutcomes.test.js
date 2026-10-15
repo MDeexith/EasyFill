@@ -1,5 +1,38 @@
 import { buildFillScript, buildDirectFillScript, mergeFillOutcomes } from '../src/webview/filler';
 
+test.each([
+  ['+91 9876543210', '9876543210', -1],
+  ['9123456789', '9123456789', 10],
+  ['919876543210', '9876543210', 10],
+])('Workday uses its separate selected dial code for %s', (phone, expected, maxLength) => {
+  const input = fakeElement({ tagName: 'INPUT', id: 'phoneNumber--phoneNumber', value: '', maxLength });
+  const { fakeDocument, fakeWindow } = createFakeDOM({ af_1: input });
+  input.ownerDocument = fakeDocument;
+  fakeDocument.getElementById = id => id === 'phoneNumber--countryPhoneCode' ? {
+    closest: () => ({ querySelector: () => ({ textContent: 'India (+91)' }) }),
+  } : null;
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildFillScript(
+    { af_1: 'phone' }, JSON.stringify({ phone, country: 'India' }), []
+  ))(fakeDocument, fakeWindow);
+  expect(input.value).toBe(expected);
+});
+
+test.each([
+  ['https://linkedin.com/in/example', 'https://www.linkedin.com/in/example'],
+  ['linkedin.com/in/example', 'https://www.linkedin.com/in/example'],
+  ['https://www.linkedin.com/in/example', 'https://www.linkedin.com/in/example'],
+  ['https://linkedin.com.example.org/in/example', 'https://linkedin.com.example.org/in/example'],
+])('normalizes LinkedIn URLs without changing the profile path: %s', (linkedIn, expected) => {
+  const input = fakeElement({ tagName: 'INPUT', value: '' });
+  const { fakeDocument, fakeWindow } = createFakeDOM({ af_1: input });
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildFillScript(
+    { af_1: 'linkedIn' }, JSON.stringify({ linkedIn }), []
+  ))(fakeDocument, fakeWindow);
+  expect(input.value).toBe(expected);
+});
+
 describe('buildFillScript outcome reporting', () => {
   const fields = [{ id: 'af_1', name: 'email', widget: 'text' }];
 
@@ -60,6 +93,76 @@ function fakeElement(attrs = {}) {
     ...attrs,
   };
 }
+
+test.each([
+  [false, 'Yes', true, 1], [true, 'Yes', true, 0],
+  [true, 'No', false, 1], [false, 'No', false, 0],
+])('standalone checkbox %s → %s changes checked state once', (checked, answer, expected, clicks) => {
+  const checkbox = fakeElement({ tagName: 'INPUT', type: 'checkbox', value: 'on', checked });
+  checkbox.click = jest.fn(() => { checkbox.checked = !checkbox.checked; });
+  const { fakeDocument, fakeWindow, messages } = createFakeDOM({ consent: checkbox });
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildDirectFillScript({ consent: answer }))(fakeDocument, fakeWindow);
+  expect(checkbox.checked).toBe(expected);
+  expect(checkbox.value).toBe('on');
+  expect(checkbox.click).toHaveBeenCalledTimes(clicks);
+  expect(messages[0].outcomes.consent).toBe('filled');
+});
+
+test('standalone checkboxes reject ambiguous answers and failed clicks', () => {
+  const checkbox = fakeElement({ tagName: 'INPUT', type: 'checkbox', value: 'on', checked: false, click() {} });
+  const { fakeDocument, fakeWindow, messages } = createFakeDOM({ consent: checkbox });
+  for (const answer of ['Maybe', 'Yes']) {
+    // eslint-disable-next-line no-new-func
+    new Function('document', 'window', buildDirectFillScript({ consent: answer }))(fakeDocument, fakeWindow);
+  }
+  expect(messages.map(message => message.outcomes.consent)).toEqual(['control-failed', 'control-failed']);
+  expect(checkbox.checked).toBe(false);
+  expect(checkbox.value).toBe('on');
+  checkbox.click = () => { throw new Error('Blocked by page'); };
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildDirectFillScript({ consent: 'Yes' }))(fakeDocument, fakeWindow);
+  expect(messages.at(-1).outcomes.consent).toBe('control-failed');
+});
+
+test.each([
+  ['false', 'Yes', 'true', 1], ['true', 'Yes', 'true', 0],
+  ['true', 'No', 'false', 1], ['false', 'No', 'false', 0],
+])('ARIA checkbox %s → %s uses its click handler', (state, answer, expected, clicks) => {
+  const attrs = { tagName: 'DIV', role: 'checkbox', 'aria-checked': state };
+  const checkbox = fakeElement(attrs);
+  checkbox.click = jest.fn(() => { attrs['aria-checked'] = attrs['aria-checked'] === 'true' ? 'false' : 'true'; });
+  const { fakeDocument, fakeWindow, messages } = createFakeDOM({ consent: checkbox });
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildDirectFillScript({ consent: answer }))(fakeDocument, fakeWindow);
+  expect(attrs['aria-checked']).toBe(expected);
+  expect(checkbox.click).toHaveBeenCalledTimes(clicks);
+  expect(messages[0].outcomes.consent).toBe('filled');
+  expect(checkbox.value).toBeUndefined();
+});
+
+test.each([
+  { 'aria-checked': 'mixed' }, { 'aria-checked': 'false', 'aria-disabled': 'true' },
+  { 'aria-checked': 'false' },
+])('ARIA checkbox fails safely when it cannot change: %o', attrs => {
+  const checkbox = fakeElement({ tagName: 'DIV', role: 'checkbox', ...attrs, click: jest.fn() });
+  const { fakeDocument, fakeWindow, messages } = createFakeDOM({ consent: checkbox });
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildDirectFillScript({ consent: 'Yes' }))(fakeDocument, fakeWindow);
+  expect(messages[0].outcomes.consent).toBe('control-failed');
+  if (attrs['aria-disabled'] || attrs['aria-checked'] === 'mixed') expect(checkbox.click).not.toHaveBeenCalled();
+  expect(checkbox.value).toBeUndefined();
+});
+
+test('native checkbox type is normalized independently of its HTML spelling', () => {
+  const checkbox = fakeElement({ tagName: 'INPUT', type: 'CHECKBOX', checked: false });
+  checkbox.type = 'checkbox';
+  checkbox.click = () => { checkbox.checked = true; };
+  const { fakeDocument, fakeWindow, messages } = createFakeDOM({ consent: checkbox });
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildDirectFillScript({ consent: 'Yes' }))(fakeDocument, fakeWindow);
+  expect(messages[0].outcomes.consent).toBe('filled');
+});
 
 describe('buildFillScript outcome reporting - runtime behavior', () => {
   function run(mapping, profile, fields, optionSelections = {}) {
@@ -236,4 +339,15 @@ describe('mergeFillOutcomes', () => {
     expect(mergeFillOutcomes(prev, undefined)).toEqual({ af_1: 'filled' });
     expect(mergeFillOutcomes(undefined, { af_2: 'filled' })).toEqual({ af_2: 'filled' });
   });
+});
+
+test('keeps the international dial code unless the field requests a national number', () => {
+  const el = fakeElement({ tagName: 'INPUT', value: '' });
+  const { fakeDocument, fakeWindow } = createFakeDOM({ af_1: el });
+  const profile = { phone: '+917021125165', country: 'India' };
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildFillScript({ af_1: 'phone' }, JSON.stringify(profile), []))(
+    fakeDocument, fakeWindow,
+  );
+  expect(el.value).toBe('+917021125165');
 });
