@@ -8,7 +8,7 @@ function fixture() {
     readyState: 'complete', addEventListener() {}, removeEventListener() {},
     querySelectorAll: selector => selector === '*' ? [] : state.elements.filter(el =>
       el.tagName === 'INPUT' || (el.tagName === 'BUTTON' && selector.includes('button[aria-haspopup')) ||
-      (el.getAttribute('role') === 'listbox' && selector.includes('[role="listbox"]'))),
+      (['listbox', 'checkbox', 'radio'].includes(el.getAttribute('role')) && selector.includes('[role="' + el.getAttribute('role') + '"]'))),
     querySelector: () => null, getElementById: () => null,
     getElementsByTagName: tag => tag === 'iframe' ? state.iframes : [],
   };
@@ -180,5 +180,43 @@ test.each(['multiselectInputContainer', '-control'])('recognizes a selected comb
   dropdown.closest = selector => selector.includes(container) ? { querySelector: () => ({ textContent: 'JavaScript' }) } : null;
   dom.state.elements = [dropdown];
   dom.install();
+  expect(dom.messages.filter(msg => msg.fields).at(-1).fields[0].hasValue).toBe(true);
+});
+
+test('an unchecked checkbox is unanswered even when its HTML value is on', () => {
+  const dom = fixture();
+  const checkbox = dom.element({ type: 'checkbox', 'aria-label': 'I acknowledge the privacy statement' });
+  checkbox.value = 'on';
+  checkbox.checked = false;
+  dom.state.elements = [checkbox];
+  dom.install();
+  expect(dom.messages.filter(msg => msg.fields).at(-1).fields[0].hasValue).toBe(false);
+  checkbox.checked = true;
+  dom.update();
+  expect(dom.messages.filter(msg => msg.fields).at(-1).fields[0].hasValue).toBe(true);
+});
+
+test.each(['checkbox', 'radio'])('ARIA %s preserves selected and mixed states', role => {
+  const dom = fixture();
+  const control = dom.element({ role, 'aria-label': 'Question', 'aria-checked': 'false' }, 'DIV');
+  dom.state.elements = [control];
+  dom.install();
+  expect(dom.messages.filter(msg => msg.fields).at(-1).fields[0].hasValue).toBe(false);
+  for (const state of ['true', 'mixed']) {
+    control.setAttribute('aria-checked', state);
+    dom.update();
+    expect(dom.messages.filter(msg => msg.fields).at(-1).fields[0].hasValue).toBe(true);
+  }
+});
+
+test.each(['checkbox', 'radio'])('a %s group preserves an existing checked option', type => {
+  const dom = fixture();
+  const options = [dom.element({ type, name: 'choices' }), dom.element({ type, name: 'choices' })];
+  options.forEach(option => { option.value = 'on'; option.checked = false; });
+  dom.state.elements = options;
+  dom.install();
+  expect(dom.messages.filter(msg => msg.fields).at(-1).fields[0]).toMatchObject({ widget: type + '-group', hasValue: false });
+  options[1].checked = true;
+  dom.update();
   expect(dom.messages.filter(msg => msg.fields).at(-1).fields[0].hasValue).toBe(true);
 });

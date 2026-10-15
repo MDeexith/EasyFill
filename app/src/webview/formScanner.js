@@ -507,6 +507,9 @@ export const FORM_SCANNER_JS = `
 
     var value = String(el.value || (widget === 'button-dropdown' || contentEditable ? el.textContent || '' : '')).trim();
     var hasValue = !!value;
+    if (widget === 'checkbox' || widget === 'radio') {
+      hasValue = tag === 'input' ? !!el.checked : /^(true|mixed)$/.test(el.getAttribute('aria-checked') || '');
+    }
     if (/^(select|button-dropdown|combobox-input)$/.test(widget)) {
       var display = widget === 'select' && el.options && el.options[el.selectedIndex]
         ? el.options[el.selectedIndex].text : value;
@@ -644,6 +647,7 @@ export const FORM_SCANNER_JS = `
         id: first.id,
         domId: first.domId,
         visible: members.some(function(m) { return m.visible; }),
+        hasValue: members.some(function(m) { return m.hasValue; }),
         disabled: members.every(function(m) { return m.disabled; }),
         name: first.name,
         tag: first.tag,

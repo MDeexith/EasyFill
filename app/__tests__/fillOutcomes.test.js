@@ -94,6 +94,76 @@ function fakeElement(attrs = {}) {
   };
 }
 
+test.each([
+  [false, 'Yes', true, 1], [true, 'Yes', true, 0],
+  [true, 'No', false, 1], [false, 'No', false, 0],
+])('standalone checkbox %s → %s changes checked state once', (checked, answer, expected, clicks) => {
+  const checkbox = fakeElement({ tagName: 'INPUT', type: 'checkbox', value: 'on', checked });
+  checkbox.click = jest.fn(() => { checkbox.checked = !checkbox.checked; });
+  const { fakeDocument, fakeWindow, messages } = createFakeDOM({ consent: checkbox });
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildDirectFillScript({ consent: answer }))(fakeDocument, fakeWindow);
+  expect(checkbox.checked).toBe(expected);
+  expect(checkbox.value).toBe('on');
+  expect(checkbox.click).toHaveBeenCalledTimes(clicks);
+  expect(messages[0].outcomes.consent).toBe('filled');
+});
+
+test('standalone checkboxes reject ambiguous answers and failed clicks', () => {
+  const checkbox = fakeElement({ tagName: 'INPUT', type: 'checkbox', value: 'on', checked: false, click() {} });
+  const { fakeDocument, fakeWindow, messages } = createFakeDOM({ consent: checkbox });
+  for (const answer of ['Maybe', 'Yes']) {
+    // eslint-disable-next-line no-new-func
+    new Function('document', 'window', buildDirectFillScript({ consent: answer }))(fakeDocument, fakeWindow);
+  }
+  expect(messages.map(message => message.outcomes.consent)).toEqual(['control-failed', 'control-failed']);
+  expect(checkbox.checked).toBe(false);
+  expect(checkbox.value).toBe('on');
+  checkbox.click = () => { throw new Error('Blocked by page'); };
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildDirectFillScript({ consent: 'Yes' }))(fakeDocument, fakeWindow);
+  expect(messages.at(-1).outcomes.consent).toBe('control-failed');
+});
+
+test.each([
+  ['false', 'Yes', 'true', 1], ['true', 'Yes', 'true', 0],
+  ['true', 'No', 'false', 1], ['false', 'No', 'false', 0],
+])('ARIA checkbox %s → %s uses its click handler', (state, answer, expected, clicks) => {
+  const attrs = { tagName: 'DIV', role: 'checkbox', 'aria-checked': state };
+  const checkbox = fakeElement(attrs);
+  checkbox.click = jest.fn(() => { attrs['aria-checked'] = attrs['aria-checked'] === 'true' ? 'false' : 'true'; });
+  const { fakeDocument, fakeWindow, messages } = createFakeDOM({ consent: checkbox });
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildDirectFillScript({ consent: answer }))(fakeDocument, fakeWindow);
+  expect(attrs['aria-checked']).toBe(expected);
+  expect(checkbox.click).toHaveBeenCalledTimes(clicks);
+  expect(messages[0].outcomes.consent).toBe('filled');
+  expect(checkbox.value).toBeUndefined();
+});
+
+test.each([
+  { 'aria-checked': 'mixed' }, { 'aria-checked': 'false', 'aria-disabled': 'true' },
+  { 'aria-checked': 'false' },
+])('ARIA checkbox fails safely when it cannot change: %o', attrs => {
+  const checkbox = fakeElement({ tagName: 'DIV', role: 'checkbox', ...attrs, click: jest.fn() });
+  const { fakeDocument, fakeWindow, messages } = createFakeDOM({ consent: checkbox });
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildDirectFillScript({ consent: 'Yes' }))(fakeDocument, fakeWindow);
+  expect(messages[0].outcomes.consent).toBe('control-failed');
+  if (attrs['aria-disabled'] || attrs['aria-checked'] === 'mixed') expect(checkbox.click).not.toHaveBeenCalled();
+  expect(checkbox.value).toBeUndefined();
+});
+
+test('native checkbox type is normalized independently of its HTML spelling', () => {
+  const checkbox = fakeElement({ tagName: 'INPUT', type: 'CHECKBOX', checked: false });
+  checkbox.type = 'checkbox';
+  checkbox.click = () => { checkbox.checked = true; };
+  const { fakeDocument, fakeWindow, messages } = createFakeDOM({ consent: checkbox });
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildDirectFillScript({ consent: 'Yes' }))(fakeDocument, fakeWindow);
+  expect(messages[0].outcomes.consent).toBe('filled');
+});
+
 describe('buildFillScript outcome reporting - runtime behavior', () => {
   function run(mapping, profile, fields, optionSelections = {}) {
     const script = buildFillScript(mapping, JSON.stringify(profile), fields, optionSelections);

@@ -640,6 +640,22 @@ function fillOne(el, value) {
   afMarkFilled(el);
   var strVal = String(value);
 
+  var nativeCheckbox = el.tagName === 'INPUT' && el.type === 'checkbox';
+  if (nativeCheckbox || el.getAttribute('role') === 'checkbox') {
+    if (el.getAttribute('aria-disabled') === 'true') return false;
+    var booleanValue = strVal.trim().toLowerCase();
+    if (!/^(yes|no|true|false|1|0)$/.test(booleanValue)) return false;
+    var checked = /^(yes|true|1)$/.test(booleanValue);
+    function checkedState() { return nativeCheckbox ? el.checked : el.getAttribute('aria-checked'); }
+    if (!nativeCheckbox) {
+      if (!/^(true|false)$/.test(checkedState())) return false;
+      checked = String(checked);
+    }
+    // Click once so the page's state handler receives the change.
+    try { if (checkedState() !== checked) el.click(); } catch (error) { return false; }
+    return checkedState() === checked;
+  }
+
   // No-op kept so existing call sites stay untouched; visual highlight removed.
   function mark() {}
 
@@ -1100,13 +1116,7 @@ export function buildCorrectionListenerScript(filledAfIds) {
     var value = '';
 
     if (type === 'checkbox' || type === 'radio') {
-      // Only learn checked state. Unchecking is not learned because (1) it would
-      // require storing a separate "off" value, but the replay path (buildFillScript
-      // -> fillOne) has no logic to set .checked = false based on a stored value,
-      // and (2) for checkbox groups, only the checked option is semantically meaningful.
-      // Standalone boolean checkboxes don't round-trip correctly through the existing
-      // replay system, which only sets .value, not .checked. Changing this would
-      // require redesigning either the storage format or the replay path.
+      // Legacy learning records selected option labels; the answer sheet captures standalone Yes/No answers.
       if (!el.checked) return;
       var lid = el.getAttribute('id');
       var lab = null;

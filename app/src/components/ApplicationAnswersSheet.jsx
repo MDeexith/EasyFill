@@ -49,8 +49,11 @@ export default function ApplicationAnswersSheet({ count, prepare, fill }) {
           </View>
           <ScrollView contentContainerStyle={styles.list} keyboardShouldPersistTaps="handled">
             {session?.fields.map((field, index) => {
-              const options = field.options || [];
-              const dropdown = ['select', 'button-dropdown', 'combobox-input'].includes(field.widget);
+              const options = field.widget === 'checkbox' ? [
+                { value: 'Yes', label: isAcknowledgment(field) ? 'Acknowledge for this application' : 'Check this box' },
+                { value: 'No', label: 'Leave unchecked' },
+              ] : field.options || [];
+              const dropdown = ['select', 'button-dropdown', 'combobox-input', 'checkbox'].includes(field.widget);
               return <Card key={field.id}>
                 <Text style={styles.question}>{index + 1}. {questionText(field)}</Text>
                 {isAcknowledgment(field) && <Text style={styles.hint}>This application only · not saved for reuse</Text>}

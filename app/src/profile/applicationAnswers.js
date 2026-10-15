@@ -19,8 +19,8 @@ export function answerKey(field, url) {
 
 export function remainingQuestions(fields, outcomes = {}) {
   return fields.filter(f => f.visible !== false && !f.disabled && !f.hasValue &&
-    (f.hasValue === false || outcomes[f.id] !== 'filled') && f.type !== 'password' && questionText(f) &&
-    ['text', 'textarea', 'contenteditable', 'select', 'button-dropdown', 'combobox-input'].includes(f.widget));
+    ((f.hasValue === false && f.widget !== 'checkbox') || outcomes[f.id] !== 'filled') && f.type !== 'password' && questionText(f) &&
+    ['text', 'textarea', 'contenteditable', 'select', 'button-dropdown', 'combobox-input', 'checkbox'].includes(f.widget));
 }
 
 export function savedAnswers(fields, url, memory) {

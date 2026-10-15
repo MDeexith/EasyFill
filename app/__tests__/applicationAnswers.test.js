@@ -45,3 +45,10 @@ test('offers only unanswered visible supported fields and preserves existing val
   expect(savedAnswers([{ ...question, hasValue: true }], url, memory)).toEqual({});
   expect(remainingQuestions([question], { q: 'filled' })).toEqual([question]);
 });
+
+test('offers unchecked acknowledgments without remembering them, and completes an explicit No', () => {
+  const field = { ...question, type: 'checkbox', widget: 'checkbox', question: 'I acknowledge the privacy statement' };
+  expect(remainingQuestions([field])).toEqual([field]);
+  expect(remainingQuestions([field], { q: 'filled' })).toEqual([]);
+  expect(answersToRemember([field], { q: 'Yes' }, { q: 'filled' }, url)).toEqual({});
+});
