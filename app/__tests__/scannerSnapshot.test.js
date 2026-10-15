@@ -120,6 +120,27 @@ test('Workday select inputs are dropdowns and their dialog search boxes are not 
   expect(dom.messages.filter(msg => msg.fields).at(-1).fields[0].widget).toBe('combobox-input');
 });
 
+test.each([1, 2, 'popup'])('uses a legend only for a single visible dropdown (%s controls)', count => {
+  const dom = fixture();
+  const dropdown = dom.element({ 'aria-haspopup': 'listbox', 'aria-label': 'Select One Required' }, 'BUTTON');
+  const twin = dom.element({});
+  twin.visible = false;
+  const other = dom.element({});
+  if (count === 'popup') other.closest = selector => selector.includes('[role="listbox"]') ? {} : null;
+  const fieldset = {
+    tagName: 'FIELDSET', childNodes: [], getAttribute: () => null,
+    querySelector: () => ({ innerText: 'Are you authorized to work in this country?' }),
+    querySelectorAll: selector => selector === 'label' ? [] : count === 1 ? [dropdown, twin] : [dropdown, other],
+  };
+  dropdown.parentElement = fieldset;
+  dropdown.closest = selector => selector === 'fieldset' ? fieldset : null;
+  dom.state.elements = [dropdown];
+  dom.install();
+  expect(dom.messages.filter(msg => msg.fields).at(-1).fields[0].label).toBe(
+    count !== 2 ? 'Are you authorized to work in this country?' : '',
+  );
+});
+
 
 test('detects a cross-origin Workday application iframe', () => {
   const dom = fixture();

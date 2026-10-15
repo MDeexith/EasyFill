@@ -62,6 +62,7 @@ const TYPE_MAP = {
 // Negation rules run first; a negative hit suppresses positive matches that
 // would otherwise win on weak signals (e.g. "start date of previous role").
 const NEGATION_RULES = [
+  { key: 'currentCompany', deny: /\bnon[-\s]?(compete|solicitation)\b/i },
   {
     key: 'startDate',
     deny: /\b(previous|past|former|prior|last)\s+(job|role|position|company|employment)|degree|graduat|education|university|college|school\b/i,
@@ -83,6 +84,18 @@ const RULES = [
   { key: 'email',             pattern: /\b(e[\s_-]?mail|email[\s_-]?address|your[\s_-]?email)\b/i },
   { key: 'phone',             pattern: /\b(phone|mobile|cell|telephone|tel|contact[\s_-]?number|ph\.?)\b/i },
 
+  // The two questions a résumé can never answer get their own profile keys,
+  // populated by ApplicationDetailsScreen / the Profile editor. They MUST be
+  // ordered before `workAuthorization` below: bestRegexMatch keeps the first
+  // rule on a confidence tie, and `workAuthorization` is a key nothing ever
+  // populates — a field claimed by it fills nothing and (before the
+  // uncovered-field fix in BrowserScreen) was excluded from the AI pass too.
+  //   "Are you legally authorized to work in the United States?"  -> authorizedToWork
+  //   "Do you now or in the future require sponsorship...?"       -> requiresSponsorship
+  { key: 'authorizedToWork',  pattern: /\b((legally[\s_-]?)?authoriz(ed|ised)[\s_-]?to[\s_-]?work|legally[\s_-]?(allowed|eligible|entitled)[\s_-]?to[\s_-]?work|eligible[\s_-]?to[\s_-]?work|authorized[\s_-]?to[\s_-]?be[\s_-]?employed)\b/i },
+  { key: 'requiresSponsorship', pattern: /\b(sponsorship|(require|requires|need|needs)[\s_-]?(a[\s_-]?)?(new[\s_-]?)?(visa|immigration|employment|h-?1b)?[\s_-]?sponsor(ing|ed)?)\b/i },
+
+
   // ── address ─────────────────────────────────────────────────────────────
   { key: 'address',           pattern: /\b(street[\s_-]?address|address[\s_-]?line[\s_-]?1?|mailing[\s_-]?address|home[\s_-]?address|residential[\s_-]?address)\b/i },
   { key: 'city',              pattern: /\b(city|town|locality)\b/i },
@@ -99,16 +112,6 @@ const RULES = [
   { key: 'currentTitle',      pattern: /\b(current[\s_-]?(job[\s_-]?)?title|current[\s_-]?role|current[\s_-]?position|present[\s_-]?title|job[\s_-]?title|designation)\b/i },
   { key: 'currentCompany',    pattern: /\b(current[\s_-]?company|present[\s_-]?company|employer|company[\s_-]?name|organization|organisation)\b/i },
   { key: 'yearsExperience',   pattern: /\b(years?[\s_-]?of[\s_-]?experience|experience[\s_-]?years|total[\s_-]?experience|exp[\s_-]?years|yoe)\b/i },
-  // The two questions a résumé can never answer get their own profile keys,
-  // populated by ApplicationDetailsScreen / the Profile editor. They MUST be
-  // ordered before `workAuthorization` below: bestRegexMatch keeps the first
-  // rule on a confidence tie, and `workAuthorization` is a key nothing ever
-  // populates — a field claimed by it fills nothing and (before the
-  // uncovered-field fix in BrowserScreen) was excluded from the AI pass too.
-  //   "Are you legally authorized to work in the United States?"  -> authorizedToWork
-  //   "Do you now or in the future require sponsorship...?"       -> requiresSponsorship
-  { key: 'authorizedToWork',  pattern: /\b((legally[\s_-]?)?authoriz(ed|ised)[\s_-]?to[\s_-]?work|legally[\s_-]?(allowed|eligible|entitled)[\s_-]?to[\s_-]?work|eligible[\s_-]?to[\s_-]?work|authorized[\s_-]?to[\s_-]?be[\s_-]?employed)\b/i },
-  { key: 'requiresSponsorship', pattern: /\b(sponsorship|(require|requires|need|needs)[\s_-]?(a[\s_-]?)?(new[\s_-]?)?(visa|immigration|employment|h-?1b)?[\s_-]?sponsor(ing|ed)?)\b/i },
   // Genuine "what IS your status" questions only — deliberately no longer
   // matches the sponsorship / authorized-to-work questions above.
   { key: 'workAuthorization', pattern: /\b(work[\s_-]?authoriz(ation|ed)|work[\s_-]?(permit|visa)|visa[\s_-]?(status|type)|immigration[\s_-]?status|right[\s_-]?to[\s_-]?work|employment[\s_-]?eligibility)\b/i },

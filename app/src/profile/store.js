@@ -137,6 +137,8 @@ export function setOnboarded(v) {
 // (stable across page loads, unlike af_N synthetic ids)
 
 const MAPPING_CACHE_KEY = 'mapping_cache';
+// Relearn mappings generated before questionnaire matching was corrected.
+const MAPPING_CACHE_VERSION = 2;
 const MAPPING_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const MAPPING_CACHE_MAX_HOSTS = 100;
 
@@ -178,7 +180,7 @@ function loadMappingCacheRaw() {
 export function getCachedMapping(hostname, fields, profile) {
   const cache = loadMappingCacheRaw();
   const entry = cache[hostname];
-  if (!entry) return null;
+  if (!entry || entry.version !== MAPPING_CACHE_VERSION) return null;
   if (Date.now() - entry.savedAt > MAPPING_CACHE_MAX_AGE_MS) return null;
   if (entry.profileHash !== profileHashStr(profile)) return null;
   const result = {};
@@ -203,7 +205,7 @@ export function saveMappingCacheEntry(hostname, mapping, fields, profile) {
     const fp = fpById[fieldId];
     if (fp) fpMapping[fp] = profileKey;
   }
-  cache[hostname] = { version: 1, savedAt: Date.now(), profileHash: profileHashStr(profile), mapping: fpMapping };
+  cache[hostname] = { version: MAPPING_CACHE_VERSION, savedAt: Date.now(), profileHash: profileHashStr(profile), mapping: fpMapping };
   const hosts = Object.keys(cache).sort((a, b) => cache[a].savedAt - cache[b].savedAt);
   while (hosts.length > MAPPING_CACHE_MAX_HOSTS) delete cache[hosts.shift()];
   storage.set(MAPPING_CACHE_KEY, JSON.stringify(cache));
@@ -220,7 +222,7 @@ export function listMappingCache() {
   const cache = loadMappingCacheRaw();
   const out = [];
   for (const [host, entry] of Object.entries(cache)) {
-    if (!entry || !entry.mapping) continue;
+    if (!entry || entry.version !== MAPPING_CACHE_VERSION || !entry.mapping) continue;
     for (const [fp, profileKey] of Object.entries(entry.mapping)) {
       const [name = '', label = '', type = '', autocomplete = ''] = fp.split('|');
       out.push({

@@ -476,6 +476,14 @@ export const FORM_SCANNER_JS = `
 
     var label = preferredLabelFor(el);
     var ariaLabel = (el.getAttribute && el.getAttribute('aria-label')) || '';
+    if (!label && /^(button-dropdown|combobox-input|select)$/.test(widget) && el.closest) {
+      var fieldset = el.closest('fieldset');
+      // Workday questionnaire dropdowns use a legend plus a hidden input twin.
+      if (fieldset && Array.from(fieldset.querySelectorAll(INPUT_SELECTOR)).filter(function(control) {
+        return control.getClientRects().length > 0 && !(control.closest &&
+          control.closest('[role="listbox"], [role="menu"], [data-automation-id="responsiveMonikerPrompt"]'));
+      }).length === 1) label = getGroupLabelFor(el);
+    }
     if (widget === 'file' && !label && !ariaLabel && el.closest) {
       var uploadGroup = el.closest('[role="group"][aria-labelledby]');
       if (uploadGroup) label = preferredLabelFor(uploadGroup);
