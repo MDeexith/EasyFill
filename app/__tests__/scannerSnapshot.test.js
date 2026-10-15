@@ -7,7 +7,8 @@ function fixture() {
   const document = {
     readyState: 'complete', addEventListener() {}, removeEventListener() {},
     querySelectorAll: selector => selector === '*' ? [] : state.elements.filter(el =>
-      el.tagName === 'INPUT' || (el.getAttribute('role') === 'listbox' && selector.includes('[role="listbox"]'))),
+      el.tagName === 'INPUT' || (el.tagName === 'BUTTON' && selector.includes('button[aria-haspopup')) ||
+      (el.getAttribute('role') === 'listbox' && selector.includes('[role="listbox"]'))),
     querySelector: () => null, getElementById: () => null,
     getElementsByTagName: tag => tag === 'iframe' ? state.iframes : [],
   };
@@ -79,6 +80,44 @@ test('a popup listbox is not described as another form field', () => {
   dom.install();
   const scans = dom.messages.filter(msg => msg.fields);
   expect(scans.flatMap(msg => msg.fields)).toEqual([]);
+});
+
+test('Workday header menus are excluded while application dropdowns remain', () => {
+  const dom = fixture();
+  const language = dom.element({ 'aria-haspopup': 'listbox', 'aria-label': 'English' }, 'BUTTON');
+  const menu = dom.element({ 'aria-haspopup': 'true', 'aria-label': 'main menu' }, 'BUTTON');
+  for (const el of [language, menu]) {
+    el.closest = selector => selector.includes('[data-automation-id="header"]') ? {} : null;
+  }
+  const country = dom.element({ 'aria-haspopup': 'listbox', 'aria-label': 'Country' }, 'BUTTON');
+  dom.state.elements = [language, menu, country];
+  dom.install();
+  expect(dom.messages.filter(msg => msg.fields).at(-1).fields.map(f => f.ariaLabel)).toEqual(['Country']);
+});
+
+test.each(['Resume/CV', 'Cover letter'])('identifies a hidden upload by its own %s group', section => {
+  const dom = fixture();
+  const upload = dom.element({ type: 'file' });
+  upload.visible = false;
+  const group = dom.element({ 'aria-labelledby': 'upload-section' }, 'DIV');
+  group.ownerDocument.getElementById = () => ({ innerText: section });
+  upload.closest = selector => selector.includes('[role="group"]') ? group : null;
+  dom.state.elements = [upload];
+  dom.install();
+  expect(dom.messages.filter(msg => msg.fields).at(-1).fields[0]).toMatchObject({
+    widget: 'file', label: section, visible: false,
+  });
+});
+
+test('Workday select inputs are dropdowns and their dialog search boxes are not extra questions', () => {
+  const dom = fixture();
+  const trigger = dom.element({ 'data-uxi-widget-type': 'selectinput' });
+  const search = dom.element({ 'data-uxi-widget-type': 'selectinput' });
+  search.closest = selector => selector.includes('responsiveMonikerPrompt') ? {} : null;
+  dom.state.elements = [trigger, search];
+  dom.install();
+  expect(dom.messages.filter(msg => msg.fields).at(-1).fields).toHaveLength(1);
+  expect(dom.messages.filter(msg => msg.fields).at(-1).fields[0].widget).toBe('combobox-input');
 });
 
 

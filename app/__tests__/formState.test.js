@@ -25,6 +25,16 @@ test('field identity changes when a reused control asks a different question', (
     .not.toBe(fieldIdentity(field('a', { label: 'State' })));
 });
 
+test('Workday selection text in aria-label does not cancel the current fill', () => {
+  const country = field('country', {
+    widget: 'button-dropdown', label: 'Country / Territory*',
+    ariaLabel: 'Country / Territory United States of America Required',
+  });
+  expect(selectChangedFields([country], [{
+    ...country, ariaLabel: 'Country / Territory India Required',
+  }])).toEqual([]);
+});
+
 test('an unchanged hidden upload is not repeatedly autofilled', () => {
   const upload = field('resume', { widget: 'file', visible: false });
   expect(selectChangedFields([], [upload])).toEqual([upload]);

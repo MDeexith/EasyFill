@@ -11,7 +11,6 @@ import {
   BackHandler,
   Linking,
   PanResponder,
-  useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import WebView from 'react-native-webview';
@@ -213,11 +212,9 @@ export default function BrowserScreen({ route, navigation }) {
   // ATS detector doesn't try to navigate to the same URL again.
   const lastAtsSrcRef = useRef(initialUrl !== url ? initialUrl : '');
 
-  const { width: screenW, height: screenH } = useWindowDimensions();
-  const FAB_W = 180;
-  const FAB_H = 46;
-
-  const fabPos = useRef({ x: screenW - FAB_W - 14, y: screenH - FAB_H - 22 - 44 });
+  const browserSize = useRef({ width: 0, height: 0 });
+  const fabSize = useRef({ width: 0, height: 0 });
+  const fabPos = useRef({ x: 0, y: 0 });
   const fabPan = useRef(new Animated.ValueXY(fabPos.current)).current;
   const isDragging = useRef(false);
 
@@ -236,8 +233,10 @@ export default function BrowserScreen({ route, navigation }) {
       },
       onPanResponderRelease: (_, g) => {
         fabPan.flattenOffset();
-        const clampedX = Math.max(8, Math.min(fabPos.current.x + g.dx, screenW - FAB_W - 8));
-        const clampedY = Math.max(8, Math.min(fabPos.current.y + g.dy, screenH - FAB_H - 80));
+        const minX = Math.min(0, fabSize.current.width + 28 - browserSize.current.width);
+        const minY = Math.min(0, fabSize.current.height + 28 - browserSize.current.height);
+        const clampedX = Math.max(minX, Math.min(fabPos.current.x + g.dx, 0));
+        const clampedY = Math.max(minY, Math.min(fabPos.current.y + g.dy, 0));
         fabPos.current = { x: clampedX, y: clampedY };
         Animated.spring(fabPan, {
           toValue: { x: clampedX, y: clampedY },
@@ -469,6 +468,8 @@ export default function BrowserScreen({ route, navigation }) {
     try {
       const profile = enrichProfile(loadProfile());
       const host = getHostname(urlRef.current);
+      const fillCount = mapping => Object.values(mapping).reduce((count, key) => count +
+        (key === 'skills' || key === 'languages' ? String(profile[key] || '').split(',').length : 1), 0);
 
       // ── PASS 1: cache + regex (no AI) ───────────────────────────────────
       const { mapping: fastMapping, decisions: fastDecisions } =
@@ -483,7 +484,7 @@ export default function BrowserScreen({ route, navigation }) {
 
       const fastOutcomes = await fillPage(
         gen => buildFillScript(fastMapping, JSON.stringify(profile), scanned, localSelections, gen),
-        Object.keys(fastMapping).length, epoch
+        fillCount(fastMapping), epoch
       );
       if (!current()) return;
 
@@ -532,7 +533,7 @@ export default function BrowserScreen({ route, navigation }) {
             aiLocalSelections = resolveLocally(uncovered, safeAiMapping, profile).selections;
             aiOutcomes = await fillPage(
               gen => buildFillScript(safeAiMapping, JSON.stringify(profile), uncovered, aiLocalSelections, gen),
-              Object.keys(safeAiMapping).length, epoch
+              fillCount(safeAiMapping), epoch
             );
             if (!current()) return;
           }
@@ -573,6 +574,9 @@ export default function BrowserScreen({ route, navigation }) {
             // No value to select => nothing to resolve; don't pay the cost of
             // opening the menu (and don't risk perturbing the page) for it.
             hasUsableProfileValue(profile, combinedMapping[f.id]) &&
+            // A comma list must be selected item by item, not resolved as one option.
+            !(['skills', 'languages'].includes(combinedMapping[f.id]) &&
+              String(profile[combinedMapping[f.id]]).includes(',')) &&
             DROPDOWN_WIDGET_NAMES.includes(f.widget) &&
             fastOutcomes[f.id] !== 'filled' &&
             aiOutcomes[f.id] !== 'filled'
@@ -973,7 +977,16 @@ export default function BrowserScreen({ route, navigation }) {
         />
       </View>
 
-      <View style={{ flex: 1, position: 'relative' }}>
+      <View
+        style={{ flex: 1, position: 'relative' }}
+        onLayout={({ nativeEvent: { layout } }) => {
+          browserSize.current = layout;
+          // Anchor to the visible WebView when rotation or the keyboard resizes it.
+          fabPos.current = { x: 0, y: 0 };
+          fabPan.setOffset({ x: 0, y: 0 });
+          fabPan.setValue(fabPos.current);
+        }}
+      >
         <WebView
           ref={webViewRef}
           source={webViewSource}
@@ -1065,21 +1078,23 @@ export default function BrowserScreen({ route, navigation }) {
         {(phase === 'detected' || phase === 'filled' || phase === 'no-fields' || phase === 'filling-ai') && (
           <Animated.View
             {...panResponder.panHandlers}
+            onLayout={({ nativeEvent: { layout } }) => { fabSize.current = layout; }}
             style={[
               styles.fab,
               {
-                left: fabPan.x,
-                top: fabPan.y,
                 opacity: fabAnim,
-                transform: [{
-                  translateY: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }),
-                }],
+                transform: [
+                  { translateX: fabPan.x },
+                  { translateY: Animated.add(fabPan.y,
+                    fabAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] })) },
+                ],
               },
             ]}
           >
             <TouchableOpacity
               activeOpacity={0.85}
               style={styles.fabBtn}
+              onPressIn={() => { isDragging.current = false; }}
               onPress={() => {
                 if (isDragging.current) return;
                 if (phase === 'no-fields') manualRescan();
@@ -1098,7 +1113,7 @@ export default function BrowserScreen({ route, navigation }) {
                   strokeWidth={phase === 'filled' ? 3 : 2.5}
                 />
               </View>
-              <Text style={styles.fabText}>
+              <Text style={styles.fabText} numberOfLines={1}>
                 {phase === 'filling-ai'
                   ? `${filledCount} filled · AI matching…`
                   : phase === 'filled'
@@ -1282,6 +1297,10 @@ const styles = StyleSheet.create({
   },
   fab: {
     position: 'absolute',
+    right: 14,
+    bottom: 14,
+    width: 240,
+    maxWidth: '90%',
   },
   fabBtn: {
     height: 46,
@@ -1303,6 +1322,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   fabText: {
+    flexShrink: 1,
     color: '#fff',
     fontSize: 13,
     fontFamily: theme.font.sans,

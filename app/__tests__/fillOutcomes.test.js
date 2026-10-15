@@ -1,5 +1,38 @@
 import { buildFillScript, buildDirectFillScript, mergeFillOutcomes } from '../src/webview/filler';
 
+test.each([
+  ['+91 9876543210', '9876543210', -1],
+  ['9123456789', '9123456789', 10],
+  ['919876543210', '9876543210', 10],
+])('Workday uses its separate selected dial code for %s', (phone, expected, maxLength) => {
+  const input = fakeElement({ tagName: 'INPUT', id: 'phoneNumber--phoneNumber', value: '', maxLength });
+  const { fakeDocument, fakeWindow } = createFakeDOM({ af_1: input });
+  input.ownerDocument = fakeDocument;
+  fakeDocument.getElementById = id => id === 'phoneNumber--countryPhoneCode' ? {
+    closest: () => ({ querySelector: () => ({ textContent: 'India (+91)' }) }),
+  } : null;
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildFillScript(
+    { af_1: 'phone' }, JSON.stringify({ phone, country: 'India' }), []
+  ))(fakeDocument, fakeWindow);
+  expect(input.value).toBe(expected);
+});
+
+test.each([
+  ['https://linkedin.com/in/example', 'https://www.linkedin.com/in/example'],
+  ['linkedin.com/in/example', 'https://www.linkedin.com/in/example'],
+  ['https://www.linkedin.com/in/example', 'https://www.linkedin.com/in/example'],
+  ['https://linkedin.com.example.org/in/example', 'https://linkedin.com.example.org/in/example'],
+])('normalizes LinkedIn URLs without changing the profile path: %s', (linkedIn, expected) => {
+  const input = fakeElement({ tagName: 'INPUT', value: '' });
+  const { fakeDocument, fakeWindow } = createFakeDOM({ af_1: input });
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildFillScript(
+    { af_1: 'linkedIn' }, JSON.stringify({ linkedIn }), []
+  ))(fakeDocument, fakeWindow);
+  expect(input.value).toBe(expected);
+});
+
 describe('buildFillScript outcome reporting', () => {
   const fields = [{ id: 'af_1', name: 'email', widget: 'text' }];
 

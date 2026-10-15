@@ -334,7 +334,8 @@ export const FORM_SCANNER_JS = `
       if (rawType === 'radio') return 'radio';
       if (rawType === 'checkbox') return 'checkbox';
       if (rawType === 'file') return 'file';
-      if (role === 'combobox' || hasPopup === 'listbox' || hasPopup === 'menu') {
+      if (role === 'combobox' || hasPopup === 'listbox' || hasPopup === 'menu' ||
+          el.getAttribute('data-uxi-widget-type') === 'selectinput') {
         return 'combobox-input';
       }
       return 'text';
@@ -407,6 +408,8 @@ export const FORM_SCANNER_JS = `
   // page (hamburger menus, "More options", etc.) as a form field. Require at
   // least one semantic identifier that ties the trigger to a form field.
   function isLabeledDropdownTrigger(el, label, ariaLabel, name, nearbyText) {
+    // Site language and navigation menus are not application answers.
+    if (el.closest && el.closest('nav, [role="navigation"], [role="banner"], [data-automation-id="header"]')) return false;
     if (label || ariaLabel || name) return true;
     if (el.id) return true;
     if (el.getAttribute && el.getAttribute('aria-labelledby')) return true;
@@ -473,6 +476,10 @@ export const FORM_SCANNER_JS = `
 
     var label = preferredLabelFor(el);
     var ariaLabel = (el.getAttribute && el.getAttribute('aria-label')) || '';
+    if (widget === 'file' && !label && !ariaLabel && el.closest) {
+      var uploadGroup = el.closest('[role="group"][aria-labelledby]');
+      if (uploadGroup) label = preferredLabelFor(uploadGroup);
+    }
     var name = (el.getAttribute && el.getAttribute('name')) || '';
     var nearbyText = getNearbyText(el);
 
@@ -547,7 +554,7 @@ export const FORM_SCANNER_JS = `
         // common during hydration; we still index them so observers can replay).
         if (!el || !el.tagName) continue;
         // Popup search boxes and option menus belong to their trigger.
-        if (el.closest && el.closest('[role="listbox"], [role="menu"]')) continue;
+        if (el.closest && el.closest('[role="listbox"], [role="menu"], [data-automation-id="responsiveMonikerPrompt"]')) continue;
         try {
           fields.push(describeField(el));
         } catch (e) {}
@@ -666,6 +673,14 @@ export const FORM_SCANNER_JS = `
   // Trusted typing while an AI request is pending belongs to the user.
   function rememberUserEdit(event) {
     if (!event.isTrusted) return;
+    var popup = event.target && event.target.closest && event.target.closest('[data-associated-widget]');
+    if (popup) {
+      var widgetId = popup.getAttribute('data-associated-widget');
+      var controls = document.querySelectorAll('[data-uxi-multiselect-id]');
+      for (var c = 0; c < controls.length; c++) {
+        if (widgetId && controls[c].getAttribute('data-uxi-multiselect-id') === widgetId) controls[c].__afUserEdited = true;
+      }
+    }
     var path = event.composedPath ? event.composedPath() : [];
     var target = path[0] || event.target;
     if (target && target.closest) target = target.closest('[data-af-id]');

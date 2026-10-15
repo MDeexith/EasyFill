@@ -1,7 +1,7 @@
 // Values/options change during filling; only the question's identity matters.
 export function fieldIdentity(field) {
   return JSON.stringify([
-    field.id, field.domId, field.name, field.label, field.ariaLabel,
+    field.id, field.domId, field.name, field.label || field.ariaLabel,
     field.type, field.widget, field.autocomplete, field.placeholder,
   ]);
 }

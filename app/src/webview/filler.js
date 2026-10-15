@@ -65,10 +65,23 @@ function afMarkFilled(el) {
 // filling the full string double-counts the code and fails validation.
 // shortcut: dial-code table covers main markets; extend when a market needs it.
 function normalisePhone(raw, country, el) {
-  if (el.getAttribute('autocomplete') !== 'tel-national' && el.maxLength !== 10) return raw;
   var digits = String(raw).replace(/[^0-9]/g, '');
+  // Workday separates the dial code without declaring tel-national.
+  var doc = el.ownerDocument || document;
+  var codeInput = /--phoneNumber$/.test(el.id || '') && doc.getElementById
+    ? doc.getElementById(el.id.replace(/--phoneNumber$/, '--countryPhoneCode')) : null;
+  var container = codeInput && codeInput.closest('[data-automation-id="multiselectInputContainer"]');
+  var selected = container && container.querySelector('[data-automation-id="selectedItem"]');
+  var selectedCode = selected && /\\(\\+([0-9]+)\\)/.exec(selected.textContent || '');
+  if (selectedCode) {
+    if (String(raw).trim().charAt(0) === '+') {
+      return digits.indexOf(selectedCode[1]) === 0 ? digits.slice(selectedCode[1].length) : raw;
+    }
+    if (el.getAttribute('autocomplete') !== 'tel-national' && el.maxLength !== 10) return digits;
+  }
+  if (el.getAttribute('autocomplete') !== 'tel-national' && el.maxLength !== 10) return raw;
   var codes = { india: '91', 'united states': '1', usa: '1', 'united kingdom': '44', uk: '44' };
-  var cc = codes[String(country || '').trim().toLowerCase()] || '';
+  var cc = selectedCode ? selectedCode[1] : codes[String(country || '').trim().toLowerCase()] || '';
   if (cc && digits.indexOf(cc) === 0 && digits.length === cc.length + 10) {
     return digits.slice(cc.length);
   }
@@ -249,6 +262,8 @@ function byAssociation(el, roots) {
 }
 
 function findListbox(el, prevListbox) {
+  var prompt = workdayPrompt(el);
+  if (prompt) return prompt.querySelector('[role="listbox"]');
   var roots = scopesOf(el);
   var assoc = byAssociation(el, roots);
   if (assoc) return assoc;
@@ -262,6 +277,7 @@ function findListbox(el, prevListbox) {
       // just leaves the field to the AI resolver; a wrong one picks a wrong
       // answer on a live application.
       if (prevListbox && nodes[j] === prevListbox) continue;
+      if (nodes[j].getAttribute('data-automation-id') === 'selectedItemList') continue;
       if (nodes[j].getClientRects && !nodes[j].getClientRects().length) continue;
       return nodes[j];
     }
@@ -381,13 +397,16 @@ function selectDropdownOption(el, value) {
           var val = cleanOptText(opt.getAttribute('data-value') || opt.getAttribute('value') || '');
           var score = target && (text === target || val === target) ? 4
             : target.length >= 2 && text.indexOf(target) === 0 ? 3 : 0;
+          // Workday offers both a catalog skill and an identical free-text choice.
+          if (score === 4 && workdayPrompt(el) && /^menuItem-REMOTE_SKILL-/.test(opt.id || '')) score = 5;
           if (score > bestScore) { best = opt; bestScore = score; tied = false; }
-          else if (score && score === bestScore) tied = true;
+          else if (score && score === bestScore && score !== 5 &&
+            !(workdayPrompt(el) && opt.id && opt.id === best.id)) tied = true;
         }
       }
       if (!best || tied) {
         // Search results can briefly contain the previous query's options.
-        if (attempts < 15) { setTimeout(poll, 150); return; }
+        if (attempts < (workdayPrompt(el) ? 25 : 15)) { setTimeout(poll, 150); return; }
         try { el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (e) {}
         resolve(false);
         return;
@@ -395,9 +414,13 @@ function selectDropdownOption(el, value) {
       try {
         afMarkFilled(el);
         try { best.scrollIntoView({ block: 'nearest' }); } catch (e) {}
-        best.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-        best.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-        best.click();
+        var action = best.querySelector && best.querySelector('[data-automation-id="promptLeafNode"]') || best;
+        var checkbox = action.querySelector && action.querySelector('input[type="checkbox"]');
+        if (!checkbox || !checkbox.checked) {
+          action.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+          action.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+          action.click();
+        }
         fireBlur(el);
         resolve(true);
       } catch (e) { resolve(false); }
@@ -473,6 +496,60 @@ function tryComboboxFill(el, value) {
   });
 }
 
+function isWorkdaySelect(el) {
+  return el.getAttribute('data-uxi-widget-type') === 'selectinput';
+}
+
+function workdayPrompt(el) {
+  var id = el.getAttribute('data-uxi-multiselect-id');
+  if (!id) return null;
+  var prompts = (el.ownerDocument || document).querySelectorAll('[data-associated-widget]');
+  for (var i = 0; i < prompts.length; i++) {
+    if (prompts[i].getAttribute('data-associated-widget') === id) return prompts[i];
+  }
+  return null;
+}
+
+async function fillWorkdaySelect(el, values) {
+  if (!afIsCurrent() || el.disabled || el.__afUserEdited || el.isConnected === false) return false;
+  openDropdown(el);
+  var prompt = null;
+  for (var attempt = 0; attempt < 15 && !prompt; attempt++) {
+    if (!afIsCurrent() || el.__afUserEdited || el.isConnected === false) return false;
+    prompt = workdayPrompt(el);
+    if (!prompt) await new Promise(function(resolve) { setTimeout(resolve, 100); });
+  }
+  if (!prompt) return false;
+  var input = prompt.querySelector('input[data-uxi-widget-type="selectinput"]') || el;
+  var ok = true;
+  for (var i = 0; i < values.length; i++) {
+    if (!afIsCurrent() || el.__afUserEdited || input.__afUserEdited || el.isConnected === false || input.isConnected === false) return false;
+    var container = el.closest && el.closest('[data-automation-id="multiselectInputContainer"]');
+    var selectedItems = container ? container.querySelectorAll('[data-automation-id="selectedItem"]') : [];
+    var alreadySelected = false;
+    for (var s = 0; s < selectedItems.length; s++) {
+      if (cleanOptText(selectedItems[s].textContent) === cleanOptText(values[i])) alreadySelected = true;
+    }
+    if (alreadySelected) continue;
+    afMarkFilled(input);
+    setNativeInput(input, values[i]);
+    await new Promise(function(resolve) { setTimeout(resolve, 100); });
+    if (!afIsCurrent() || el.__afUserEdited || input.__afUserEdited) return false;
+    // Workday searches on Enter; typing alone leaves its previous result list.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    if (!await selectDropdownOption(el, values[i])) ok = false;
+    await new Promise(function(resolve) { setTimeout(resolve, 100); });
+  }
+  if (!afIsCurrent()) return false;
+  var buttons = prompt.querySelectorAll('button');
+  for (var b = 0; b < buttons.length; b++) {
+    if ((buttons[b].textContent || '').trim() === 'Done') { buttons[b].click(); break; }
+  }
+  fireBlur(el);
+  return ok;
+}
+
 function fillChips(el, values) {
   afMarkFilled(el);
   fireFocus(el);
@@ -541,6 +618,7 @@ function fillOne(el, value) {
 
   // Combobox / custom dropdown — try first, fall through to native fill if it
   // wasn't actually a combobox.
+  if (isWorkdaySelect(el)) return fillWorkdaySelect(el, [strVal]);
   var combo = tryComboboxFill(el, strVal);
   if (combo) return combo;
 
@@ -618,6 +696,11 @@ export function buildResumeAttachScript(fieldIds, base64, fileName, mime) {
     ids.forEach(function(id) {
       var el = findEl(id);
       if (!el || (el.type || '').toLowerCase() !== 'file') { outcomes[id] = 'control-failed'; return; }
+      var upload = el.closest && el.closest('[data-automation-id="attachments-FileUpload"]');
+      if ((el.files && el.files.length) || (upload && upload.querySelector('[data-automation-id="file-upload-successful"]'))) {
+        outcomes[id] = 'filled';
+        return;
+      }
       try {
         afMarkFilled(el);
         el.files = dt.files;
@@ -722,6 +805,11 @@ export function buildComboboxHarvestScript(fieldIds, generation = null) {
   }
 
   function closeAny(el) {
+    var prompt = workdayPrompt(el);
+    var buttons = prompt ? prompt.querySelectorAll('button') : [];
+    for (var b = 0; b < buttons.length; b++) {
+      if ((buttons[b].textContent || '').trim() === 'Done') { buttons[b].click(); break; }
+    }
     try {
       el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
     } catch (e) {}
@@ -847,6 +935,13 @@ export function buildFillScript(mapping, profileJson, fields, optionSelections =
     if (!el) { outcomes[fieldId] = 'control-failed'; return; }
 
     if (profileKey === 'phone') val = normalisePhone(val, profile.country, el);
+    // Workday rejects the equivalent LinkedIn URL without the www host.
+    if (profileKey === 'linkedIn') val = String(val).trim().replace(/^(?:https?:\\/\\/)?(?:www\\.)?linkedin\\.com\\//i, 'https://www.linkedin.com/');
+
+    if (CHIP_KEYS[profileKey] && isWorkdaySelect(el) && !el.__afUserEdited) {
+      var choices = String(val).split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+      return fillWorkdaySelect(el, choices).then(record, function() { record(false); });
+    }
 
     if (el.tagName === 'INPUT' && !el.__afUserEdited && CHIP_KEYS[profileKey] && (el.getAttribute('role') === 'combobox' ||
         el.getAttribute('aria-haspopup') === 'listbox')) {
