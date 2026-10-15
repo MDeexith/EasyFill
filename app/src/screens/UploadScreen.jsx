@@ -82,7 +82,7 @@ export default function UploadScreen({ navigation }) {
       // Keep the PDF itself so the browser can attach it to "Upload Resume"
       // fields later. Best-effort: parsing succeeded, so a failed copy only
       // loses the attach feature, not onboarding.
-      let resumeExtra = {};
+      let resumeExtra = { resumeFilePath: '', resumeFileName: '' };
       try {
         const [copy] = await keepLocalCopy({
           files: [{ uri: result.uri, fileName: result.name ?? 'resume.pdf' }],

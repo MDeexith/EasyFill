@@ -1,6 +1,10 @@
 export const FORM_SCANNER_JS = `
 (function() {
-  if (window.__AF_SCANNER_INSTALLED__) { return; }
+  if (window.__AF_SCANNER_INSTALLED__) {
+    if (window.__AF_RESCAN__) window.__AF_RESCAN__();
+    return;
+  }
+  if (window.__AF_SCANNER_CLEANUP__) window.__AF_SCANNER_CLEANUP__();
   window.__AF_SCANNER_INSTALLED__ = true;
 
   var AF_ATTR = 'data-af-id';
@@ -9,16 +13,16 @@ export const FORM_SCANNER_JS = `
     'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([aria-hidden="true"]),' +
     'textarea, select, [contenteditable=""], [contenteditable="true"], [role="textbox"],' +
     // Button-style and div-style dropdowns (Headless UI, Radix, Workday, etc.)
-    '[role="combobox"], [role="listbox"],' +
+    '[role="combobox"],' +
     'button[aria-haspopup="listbox"], button[aria-haspopup="menu"], button[aria-haspopup="true"],' +
     '[aria-haspopup="listbox"], [aria-haspopup="menu"],' +
     // ARIA-only radios/checkboxes (rare, but used by some custom controls)
     '[role="radio"], [role="checkbox"]';
 
   // Stable counter so af_<n> ids never collide
-  var afCounter = 0;
+  if (window.__AF_FIELD_COUNTER__ == null) window.__AF_FIELD_COUNTER__ = 0;
   // Field-set fingerprint to debounce no-op re-scans
-  var lastFingerprint = '';
+  var lastFingerprint = null;
   var stableScans = 0;
   var rescanTimer = null;
 
@@ -32,7 +36,7 @@ export const FORM_SCANNER_JS = `
     return false;
   }
 
-  var ATS_DOMAIN_RE = /\b(boards\.greenhouse\.io|job-boards\.greenhouse\.io|jobs\.lever\.co|app\.lever\.co|wd\d+\.myworkdayjobs\.com|apply\.workable\.com|smartrecruiters\.com|icims\.com|taleo\.net|jobvite\.com|ashbyhq\.com|recruitee\.com|bamboohr\.com)\b/i;
+  var ATS_DOMAIN_RE = /\\b(boards\\.greenhouse\\.io|job-boards\\.greenhouse\\.io|jobs\\.lever\\.co|app\\.lever\\.co|wd\\d+\\.myworkdayjobs\\.com|apply\\.workable\\.com|smartrecruiters\\.com|icims\\.com|taleo\\.net|jobvite\\.com|ashbyhq\\.com|recruitee\\.com|bamboohr\\.com)\\b/i;
 
   function reportAtsIframe(src) {
     if (!src || !window.ReactNativeWebView) return false;
@@ -457,7 +461,7 @@ export const FORM_SCANNER_JS = `
     var afId = el.getAttribute(AF_ATTR);
     if (!afId) {
       // Always use a synthetic id; never trust el.id (collisions in the wild)
-      afId = 'af_' + (afCounter++);
+      afId = 'af_' + (window.__AF_FIELD_COUNTER__++);
       try { el.setAttribute(AF_ATTR, afId); } catch (e) {}
     }
 
@@ -484,6 +488,7 @@ export const FORM_SCANNER_JS = `
       id: afId,
       domId: el.id || '',
       visible: visible,
+      disabled: !!(el.disabled || (el.readOnly && widget !== 'combobox-input') || (el.getAttribute && el.getAttribute('aria-disabled') === 'true')),
       name: name,
       tag: tag,
       type: inputType,
@@ -531,6 +536,7 @@ export const FORM_SCANNER_JS = `
   }
 
   function scanForms() {
+    if (window.__AF_RESCAN__ !== scanForms) return;
     var fields = [];
     var docs = getDocs(document);
     for (var d = 0; d < docs.length; d++) {
@@ -540,6 +546,8 @@ export const FORM_SCANNER_JS = `
         // Skip elements that are visually irrelevant (display:none ancestors are
         // common during hydration; we still index them so observers can replay).
         if (!el || !el.tagName) continue;
+        // Popup search boxes and option menus belong to their trigger.
+        if (el.closest && el.closest('[role="listbox"], [role="menu"]')) continue;
         try {
           fields.push(describeField(el));
         } catch (e) {}
@@ -602,6 +610,8 @@ export const FORM_SCANNER_JS = `
       grouped.push({
         id: first.id,
         domId: first.domId,
+        visible: members.some(function(m) { return m.visible; }),
+        disabled: members.every(function(m) { return m.disabled; }),
         name: first.name,
         tag: first.tag,
         type: first.type,
@@ -629,18 +639,15 @@ export const FORM_SCANNER_JS = `
     unique = standalone.concat(grouped);
 
     // Stable fingerprint of the field set; suppress duplicate posts
-    var fp = unique.map(function(f) {
-      return f.id + ':' + f.name + ':' + f.type + ':' + f.autocomplete +
-        ':' + (f.options ? f.options.length : 0);
-    }).join('|');
+    var fp = JSON.stringify(unique);
 
-    if (fp === lastFingerprint && fp !== '') {
+    if (fp === lastFingerprint) {
       stableScans++;
     } else {
-      var isFirstScan = lastFingerprint === '';
+      var isFirstScan = lastFingerprint === null;
       lastFingerprint = fp;
       stableScans = 0;
-      if (unique.length > 0 && window.ReactNativeWebView) {
+      if (window.ReactNativeWebView) {
         window.ReactNativeWebView.postMessage(JSON.stringify({
           type: isFirstScan ? 'FIELDS_SCANNED' : 'FIELDS_UPDATED', fields: unique,
         }));
@@ -656,6 +663,19 @@ export const FORM_SCANNER_JS = `
     }, delay || 250);
   }
 
+  // Trusted typing while an AI request is pending belongs to the user.
+  function rememberUserEdit(event) {
+    if (!event.isTrusted) return;
+    var path = event.composedPath ? event.composedPath() : [];
+    var target = path[0] || event.target;
+    if (target && target.closest) target = target.closest('[data-af-id]');
+    if (target) target.__afUserEdited = true;
+  }
+  document.addEventListener('input', rememberUserEdit, true);
+  document.addEventListener('change', rememberUserEdit, true);
+  document.addEventListener('pointerdown', rememberUserEdit, true);
+  document.addEventListener('keydown', rememberUserEdit, true);
+
   // ── triggers ─────────────────────────────────────────────────────────────
 
   // Eager Greenhouse detection — fires *before* iframe is even injected, by
@@ -668,6 +688,7 @@ export const FORM_SCANNER_JS = `
   try { pollForAtsIframes(); } catch (e) {}
   try { postDiag('install'); } catch (e) {}
 
+  window.__AF_RESCAN__ = scanForms;
   scanForms();
 
   if (document.readyState !== 'complete') {
@@ -710,7 +731,10 @@ export const FORM_SCANNER_JS = `
             try { reportAtsIframe(t.src || t.getAttribute('src') || ''); } catch (e) {}
             atsTrigger = true;
           }
-          else if (t && t.matches && t.matches(INPUT_SELECTOR)) trigger = true;
+          else if (t && t.matches && (t.matches(INPUT_SELECTOR) ||
+            (t.querySelector && t.querySelector(INPUT_SELECTOR)))) trigger = true;
+        } else if (mut.type === 'characterData' || (mut.removedNodes && mut.removedNodes.length)) {
+          trigger = true;
         } else if (mut.addedNodes && mut.addedNodes.length) {
           for (var n = 0; n < mut.addedNodes.length; n++) {
             var node = mut.addedNodes[n];
@@ -721,6 +745,7 @@ export const FORM_SCANNER_JS = `
               try { reportAtsIframe(node.src || node.getAttribute('src') || ''); } catch (e) {}
               trigger = true;
             } else if (
+              (node.matches && node.matches(INPUT_SELECTOR)) ||
               node.tagName === 'FORM' ||
               node.tagName === 'INPUT' ||
               node.tagName === 'TEXTAREA' ||
@@ -751,7 +776,8 @@ export const FORM_SCANNER_JS = `
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['name', 'id', 'autocomplete', 'type', 'role', 'aria-label', 'aria-labelledby', 'placeholder', 'style', 'class', 'hidden', 'src'],
+      characterData: true,
+      attributeFilter: ['name', 'id', 'autocomplete', 'type', 'role', 'aria-label', 'aria-labelledby', 'placeholder', 'style', 'class', 'hidden', 'src', 'disabled', 'readonly', 'aria-disabled'],
     });
   } catch (e) {}
 
@@ -797,5 +823,15 @@ export const FORM_SCANNER_JS = `
       childList: true, subtree: true,
     });
   } catch (e) {}
+  window.__AF_SCANNER_CLEANUP__ = function() {
+    if (observer) observer.disconnect();
+    if (visObs) visObs.disconnect();
+    if (inputAddObs) inputAddObs.disconnect();
+    if (rescanTimer) clearTimeout(rescanTimer);
+    document.removeEventListener('input', rememberUserEdit, true);
+    document.removeEventListener('change', rememberUserEdit, true);
+    document.removeEventListener('pointerdown', rememberUserEdit, true);
+    document.removeEventListener('keydown', rememberUserEdit, true);
+  };
 })();
 `;

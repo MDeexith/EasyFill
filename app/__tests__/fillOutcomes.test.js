@@ -237,3 +237,14 @@ describe('mergeFillOutcomes', () => {
     expect(mergeFillOutcomes(undefined, { af_2: 'filled' })).toEqual({ af_2: 'filled' });
   });
 });
+
+test('keeps the international dial code unless the field requests a national number', () => {
+  const el = fakeElement({ tagName: 'INPUT', value: '' });
+  const { fakeDocument, fakeWindow } = createFakeDOM({ af_1: el });
+  const profile = { phone: '+917021125165', country: 'India' };
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'window', buildFillScript({ af_1: 'phone' }, JSON.stringify(profile), []))(
+    fakeDocument, fakeWindow,
+  );
+  expect(el.value).toBe('+917021125165');
+});

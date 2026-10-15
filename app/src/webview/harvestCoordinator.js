@@ -32,7 +32,8 @@ export function createHarvestCoordinator() {
 
   function settlePending(value) {
     if (!pending) return;
-    const { resolve } = pending;
+    const { resolve, timer } = pending;
+    clearTimeout(timer);
     pending = null;
     resolve(value);
   }
@@ -57,13 +58,13 @@ export function createHarvestCoordinator() {
 
     return new Promise(resolve => {
       pending = { generation: myGeneration, resolve };
-      inject(myGeneration);
-      setTimeout(() => {
+      pending.timer = setTimeout(() => {
         if (pending && pending.generation === myGeneration) {
           pending = null;
           resolve({});
         }
       }, timeoutMs);
+      try { inject(myGeneration); } catch { settlePending({}); }
     });
   }
 
@@ -87,5 +88,5 @@ export function createHarvestCoordinator() {
     settlePending(options || {});
   }
 
-  return { startHarvest, deliver };
+  return { startHarvest, deliver, cancel: () => settlePending({}) };
 }

@@ -174,3 +174,12 @@ describe('createHarvestCoordinator - default generation is untagged', () => {
     await expect(promise).resolves.toEqual({ af_1: [{ value: 'a', label: 'A' }] });
   });
 });
+
+test('cancellation settles an in-flight page request and ignores its late reply', async () => {
+  const coordinator = createHarvestCoordinator();
+  const inject = jest.fn();
+  const reply = coordinator.startHarvest(inject);
+  coordinator.cancel();
+  coordinator.deliver({ af_1: 'filled' }, inject.mock.calls[0][0]);
+  await expect(reply).resolves.toEqual({});
+});
